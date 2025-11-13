@@ -1,0 +1,22 @@
+[package]
+name = "async-web"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dd-trace = { path = "../dd-trace-rs/dd-trace" }
+datadog-opentelemetry = { path = "../dd-trace-rs/datadog-opentelemetry", features = ["context-observer"] }
+actix-web = "4"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-log = "0.2"
+# tracing-opentelemetry = "0.32"  # Commented out due to version conflicts
+opentelemetry = { path = "../opentelemetry-rust/opentelemetry" }
+opentelemetry_sdk = { path = "../opentelemetry-rust/opentelemetry-sdk" }
+# opentelemetry-instrumentation-actix-web = "0.23"  # Commented out due to version conflicts
+uuid = { version = "1.0", features = ["v4"] }
