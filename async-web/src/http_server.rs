@@ -1,9 +1,12 @@
 use actix_web::dev::Server;
 use actix_web::{App, HttpResponse, HttpServer, web};
+use opentelemetry::{
+    Context, global,
+    trace::{TraceContextExt, Tracer, TracerProvider},
+};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
-use opentelemetry::{global, trace::{Tracer, TracerProvider, TraceContextExt}, Context};
 
 #[derive(Deserialize, Serialize)]
 pub struct DoWorkRequest {
@@ -25,7 +28,13 @@ struct DoWorkResponse {
 pub async fn do_work_handler(request: web::Json<DoWorkRequest>) -> HttpResponse {
     // Create an OpenTelemetry span and attach it to trigger context label logging
     let tracer = global::tracer_provider().tracer("async-web");
-    let span = tracer.start("do_work_handler");
+    let span = tracer
+        .span_builder("do_work_handler")
+        .with_attributes(vec![opentelemetry::KeyValue::new(
+            "http.route",
+            "/do_work",
+        )])
+        .start(&tracer);
     let cx = Context::current_with_span(span);
     let _guard = cx.attach();
 
@@ -97,7 +106,13 @@ struct MergesortResponse {
 pub async fn mergesort_handler(request: web::Json<MergesortRequest>) -> HttpResponse {
     // Create an OpenTelemetry span and attach it to trigger context label logging
     let tracer = global::tracer_provider().tracer("async-web");
-    let span = tracer.start("mergesort_handler");
+    let span = tracer
+        .span_builder("mergesort_handler")
+        .with_attributes(vec![opentelemetry::KeyValue::new(
+            "http.route",
+            "/mergesort",
+        )])
+        .start(&tracer);
     let cx = Context::current_with_span(span);
     let _guard = cx.attach();
 
@@ -204,7 +219,13 @@ struct PrimeSieveResponse {
 pub async fn prime_sieve_handler(request: web::Json<PrimeSieveRequest>) -> HttpResponse {
     // Create an OpenTelemetry span and attach it to trigger context label logging
     let tracer = global::tracer_provider().tracer("async-web");
-    let span = tracer.start("prime_sieve_handler");
+    let span = tracer
+        .span_builder("prime_sieve_handler")
+        .with_attributes(vec![opentelemetry::KeyValue::new(
+            "http.route",
+            "/prime_sieve",
+        )])
+        .start(&tracer);
     let cx = Context::current_with_span(span);
     let _guard = cx.attach();
 
@@ -282,7 +303,7 @@ fn sieve_of_eratosthenes(limit: usize) -> Vec<usize> {
 pub fn start_http_server() -> Server {
     HttpServer::new(move || {
         App::new()
-            // .wrap(opentelemetry_instrumentation_actix_web::RequestTracing::new())  // Commented out due to version conflicts
+            .wrap(opentelemetry_instrumentation_actix_web::RequestTracing::new())
             .route("/do_work", web::post().to(do_work_handler))
             .route("/mergesort", web::post().to(mergesort_handler))
             .route("/prime_sieve", web::post().to(prime_sieve_handler))

@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 pub fn background_client_thread(request_count: Arc<AtomicUsize>, shutdown_signal: Arc<AtomicBool>) {
     const NUM_PARALLEL_CLIENTS: usize = 5; // Number of parallel client threads
-    const REQUESTS_PER_CLIENT: usize = 300; // Each client makes 50 requests
+    const REQUESTS_PER_CLIENT: usize = 1500; // Each client makes 1500 requests
 
     info!(
         "Background client thread started: {NUM_PARALLEL_CLIENTS} parallel clients, {REQUESTS_PER_CLIENT} reqs per client"

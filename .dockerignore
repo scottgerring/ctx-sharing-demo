@@ -1,0 +1,16 @@
+# Rust build artifacts
+**/target/
+**/Cargo.lock
+
+# Git
+**/.git/
+**/.gitignore
+
+# IDE
+**/.vscode/
+**/.idea/
+**/.claude/
+
+# Other
+**/.jj/
+**/node_modules/

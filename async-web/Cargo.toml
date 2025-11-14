@@ -18,5 +18,8 @@ tracing-log = "0.2"
 # tracing-opentelemetry = "0.32"  # Commented out due to version conflicts
 opentelemetry = { path = "../opentelemetry-rust/opentelemetry" }
 opentelemetry_sdk = { path = "../opentelemetry-rust/opentelemetry-sdk" }
-# opentelemetry-instrumentation-actix-web = "0.23"  # Commented out due to version conflicts
+opentelemetry-instrumentation-actix-web = "0.23"
 uuid = { version = "1.0", features = ["v4"] }
+
+[build-dependencies]
+custom-labels = "0.4"
