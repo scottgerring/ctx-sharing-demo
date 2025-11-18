@@ -28,33 +28,47 @@ pub struct CustomLabelsLabelSet {
     pub capacity: usize,
 }
 
-/// Parsed label as Rust strings
+/// Parsed label value - either text or raw bytes
+#[derive(Debug, Clone)]
+pub enum LabelValue {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+/// Parsed label
 #[derive(Debug, Clone)]
 pub struct Label {
     pub key: String,
-    pub value: String,
+    pub value: LabelValue,
 }
 
-/// Read a string from the memory of a particular process
-pub fn read_string(pid: i32, string: CustomLabelsString) -> Result<Option<String>> {
+/// Read raw bytes from the memory of a particular process
+fn read_bytes(pid: i32, string: CustomLabelsString) -> Result<Option<Vec<u8>>> {
     // Null pointer means absent value
     if string.buf == 0 {
         return Ok(None);
     }
 
     if string.len == 0 {
-        return Ok(Some(String::new()));
+        return Ok(Some(Vec::new()));
     }
 
-    // Read the string bytes from remote process
+    // Read the bytes from remote process
     let mut buffer = vec![0u8; string.len];
     read_memory(pid, string.buf, &mut buffer)?;
 
-    // Try to parse as UTF-8, fall back to lossy conversion
-    let s = String::from_utf8(buffer)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    Ok(Some(buffer))
+}
 
-    Ok(Some(s))
+/// Read a string from the memory of a particular process
+pub fn read_string(pid: i32, string: CustomLabelsString) -> Result<Option<String>> {
+    let bytes = read_bytes(pid, string)?;
+
+    Ok(bytes.map(|b| {
+        // Try to parse as UTF-8, fall back to lossy conversion
+        String::from_utf8(b.clone())
+            .unwrap_or_else(|_| String::from_utf8_lossy(&b).into_owned())
+    }))
 }
 
 /// Parse labels from a labelset
@@ -85,9 +99,22 @@ pub fn parse_labels(pid: i32, labelset: CustomLabelsLabelSet) -> Result<Vec<Labe
             continue;
         }
 
-        // Read key and value
+        // Read key
         let key = read_string(pid, label.key)?.context("Label has null key")?;
-        let value = read_string(pid, label.value)?.context("Label has null value")?;
+
+        // Determine if this is a binary field (trace IDs) or text field
+        let value = match key.as_str() {
+            "trace_id" | "span_id" | "local_root_span_id" => {
+                // These are binary fields - read as raw bytes
+                let bytes = read_bytes(pid, label.value)?.context("Label has null value")?;
+                LabelValue::Bytes(bytes)
+            }
+            _ => {
+                // Regular text field
+                let text = read_string(pid, label.value)?.context("Label has null value")?;
+                LabelValue::Text(text)
+            }
+        };
 
         // We only use the first instance of each key. It's probably worth
         // warning if we see more than one.

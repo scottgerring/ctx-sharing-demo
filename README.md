@@ -6,7 +6,7 @@ made up of the following bits:
 
 ### A Demo App
 
-* [opentelemetry-rust context-observer-test fork](https://github.com/scottgerring/opentelemetry-rust/tree/scottgerring/context-observer-test) - forked on top of Björn's context observer branch, and extended to capture local root span ID as well. 
+* [opentelemetry-rust context-observer-test fork](https://github.com/bantonsson/opentelemetry-rust/tree/ban/context-observer-test) - Björn's context observer branch gives us the basic hook we need to capture what's happening in OTel. We will have to work to get this upstreamed before we can update dd-trace-rs.
 * [dd-trace-rs context-observer-test fork](https://github.com/scottgerring/dd-trace-rs/tree/scottgerring/context-observer-test) - add an implementation of the context observer that can write to either the polarsignal's label storage (and thus process TL), _or_, to stdout.
 * [async-web](async-web) - This is the Rust app. It is instrumented with [dd-trace-rs] with the context observation turned on, and some magical build args sprinkled in to ensure that the TL symbols are published in the resulting binary.
 
@@ -25,8 +25,10 @@ for this to work. I will clean this up when other people care :)
 
 * Is `local root span ID` something that only _Datadog_ is going to need as part of this, or _everyone_? This goes to whether or not this should be a sort of first-class feature in the context observation mechanism, or not
 * What about the set of additional request metadata to capture - is this likely to be a static, globally-agreed set, or is it going to be have to be user configurable? E.g. does dd-trace-rs need to be able to ask otel-rust for a set of metadata that otel-rust does not in advance know of.
+* How terrible do we feel about reading span data before it is finalized? Trace & Span IDs should be fine and immutable, other span attributes are not per the OTel spec. Björn observes that that _in practice_ these should be immutable, as things like sampling will not work properly if they are mutated after the span is created. 
 
 ## Observations
+* The memory format itself uses a root 'label set' with keys/values referenced out by pointer; this means we need to do a bunch of individual reads into the process while it is being suspended to extract state. Could we not do this in one contiguous chunk by constraining the maximum size of the record? 
 * The `build.rs` customization required in the user's executable is not great UX:
   * Extra `build-dependency` from the user's app on the polarsignals lib 
   * Custom `build.rs` to invoke the polarsignals customization pieces

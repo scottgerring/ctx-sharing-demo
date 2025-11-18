@@ -132,9 +132,9 @@ dependencies = [
 
 [[package]]
 name = "actix-web"
-version = "4.11.0"
+version = "4.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a597b77b5c6d6a1e1097fddde329a83665e25c5437c696a3a9a4aa514a614dea"
+checksum = "2233f53f6cb18ae038ce1f0713ca0c72ca0c4b71fe9aaeb59924ce2c89c6dd85"
 dependencies = [
  "actix-codec",
  "actix-http",
@@ -167,7 +167,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "smallvec",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "time",
  "tracing",
  "url",
@@ -241,7 +241,7 @@ dependencies = [
  "custom-labels",
  "datadog-opentelemetry",
  "dd-trace",
- "opentelemetry 0.31.0",
+ "opentelemetry",
  "opentelemetry-instrumentation-actix-web",
  "opentelemetry_sdk",
  "rand 0.8.5",
@@ -353,9 +353,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.10.1"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
 name = "bytestring"
@@ -377,9 +377,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.45"
+version = "1.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35900b6c8d709fb1d854671ae27aeaa9eec2f8b01b364e1619a40da3e6fe2afe"
+checksum = "b97463e1064cb1b1c1384ad0a0b9c8abd0988e2a91f52606c80ef14aadb63e36"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -539,7 +539,7 @@ dependencies = [
  "either",
  "http 1.3.1",
  "http-body-util",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "hyper-util",
  "rmp-serde",
  "serde",
@@ -574,8 +574,8 @@ dependencies = [
  "foldhash",
  "futures",
  "hashbrown 0.15.5",
- "opentelemetry 0.31.0",
- "opentelemetry-semantic-conventions 0.31.0",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "rand 0.8.5",
  "serde_json",
@@ -587,8 +587,8 @@ version = "0.0.1"
 dependencies = [
  "datadog-trace-utils",
  "dd-trace",
- "opentelemetry 0.31.0",
- "opentelemetry-semantic-conventions 0.31.0",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "serde",
 ]
@@ -635,7 +635,7 @@ dependencies = [
  "ddcommon",
  "futures",
  "http-body-util",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "prost",
  "rand 0.8.5",
  "rmp",
@@ -658,7 +658,7 @@ dependencies = [
  "ddcommon",
  "ddtelemetry",
  "http-body-util",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "hyper-util",
  "rustc_version_runtime",
  "serde",
@@ -674,7 +674,7 @@ name = "dd-trace-propagation"
 version = "0.0.1"
 dependencies = [
  "dd-trace",
- "opentelemetry 0.31.0",
+ "opentelemetry",
  "thiserror 1.0.69",
 ]
 
@@ -685,8 +685,8 @@ dependencies = [
  "datadog-opentelemetry-mappings",
  "dd-trace",
  "lru",
- "opentelemetry 0.31.0",
- "opentelemetry-semantic-conventions 0.31.0",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "regex",
  "serde",
@@ -708,7 +708,7 @@ dependencies = [
  "http 1.3.1",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "hyper-util",
  "libc",
  "nix",
@@ -735,7 +735,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "http 1.3.1",
  "http-body-util",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "hyper-util",
  "serde",
  "serde_json",
@@ -849,9 +849,9 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52051878f80a721bb68ebfbc930e07b65ba72f2da88968ea5c06fd6ca3d3a127"
+checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 
 [[package]]
 name = "flate2"
@@ -1163,9 +1163,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.8.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1744436df46f0bde35af3eda22aeaba453aada65d8f1c171cd8a5f59030bd69f"
+checksum = "2ab2d4f250c3d7b1c9fcdff1cece94ea4e2dfbec68614f7b87cb205f24ca9d11"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1197,9 +1197,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.17"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c6995591a8f1380fcb4ba966a252a4b29188d51d2b89e3a252f5305be65aea8"
+checksum = "52e9a2a24dc5c6821e71a7030e1e14b7b632acac55c40e9d2e082c621261bb56"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1207,7 +1207,7 @@ dependencies = [
  "futures-util",
  "http 1.3.1",
  "http-body 1.0.1",
- "hyper 1.8.0",
+ "hyper 1.8.1",
  "libc",
  "pin-project-lite",
  "socket2 0.6.1",
@@ -1630,20 +1630,7 @@ dependencies = [
 [[package]]
 name = "opentelemetry"
 version = "0.31.0"
-dependencies = [
- "futures-core",
- "futures-sink",
- "js-sys",
- "pin-project-lite",
- "thiserror 2.0.17",
- "tracing",
-]
-
-[[package]]
-name = "opentelemetry"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -1662,29 +1649,25 @@ dependencies = [
  "actix-http",
  "actix-web",
  "futures-util",
- "opentelemetry 0.31.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "opentelemetry-semantic-conventions 0.31.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
  "serde",
 ]
 
 [[package]]
 name = "opentelemetry-semantic-conventions"
 version = "0.31.0"
-
-[[package]]
-name = "opentelemetry-semantic-conventions"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62e29dfe041afb8ed2a6c9737ab57db4907285d999ef8ad3a59092a36bdc846"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
 
 [[package]]
 name = "opentelemetry_sdk"
 version = "0.31.0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
 dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "opentelemetry 0.31.0",
+ "opentelemetry",
  "percent-encoding",
  "rand 0.9.2",
  "thiserror 2.0.17",
@@ -3099,3 +3082,28 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "opentelemetry-appender-tracing"
+version = "0.31.1"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
+
+[[patch.unused]]
+name = "opentelemetry-http"
+version = "0.31.0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
+
+[[patch.unused]]
+name = "opentelemetry-otlp"
+version = "0.31.0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
+
+[[patch.unused]]
+name = "opentelemetry-proto"
+version = "0.31.0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"
+
+[[patch.unused]]
+name = "opentelemetry-stdout"
+version = "0.31.0"
+source = "git+https://github.com/bantonsson/opentelemetry-rust?branch=ban%2Fcontext-observer-test#053ce6c89408eaaee25ebfc7c7a70108bac921ed"

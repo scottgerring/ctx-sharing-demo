@@ -1,3 +1,4 @@
+use crate::label_parser::LabelValue;
 use crate::tls_reader::ThreadResult;
 use tracing::info;
 
@@ -29,7 +30,16 @@ pub fn print_iteration(iteration: u64, results: &[ThreadResult]) {
     for (tid, labels) in found_threads {
         let label_strs: Vec<String> = labels
             .iter()
-            .map(|l| format!("{}={}", l.key, l.value))
+            .map(|l| {
+                let value_str = match &l.value {
+                    LabelValue::Text(s) => s.clone(),
+                    LabelValue::Bytes(b) => {
+                        // Format bytes as hex string
+                        b.iter().map(|byte| format!("{:02x}", byte)).collect()
+                    }
+                };
+                format!("{}={}", l.key, value_str)
+            })
             .collect();
 
         info!(

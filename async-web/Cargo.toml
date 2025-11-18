@@ -16,10 +16,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-log = "0.2"
 # tracing-opentelemetry = "0.32"  # Commented out due to version conflicts
-opentelemetry = { path = "../opentelemetry-rust/opentelemetry" }
-opentelemetry_sdk = { path = "../opentelemetry-rust/opentelemetry-sdk" }
+opentelemetry = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry_sdk = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
 opentelemetry-instrumentation-actix-web = "0.23"
 uuid = { version = "1.0", features = ["v4"] }
 
 [build-dependencies]
 custom-labels = "0.4"
+
+[patch.crates-io]
+opentelemetry = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry_sdk = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-semantic-conventions = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-appender-tracing = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-http = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-stdout = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-otlp = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-proto = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
