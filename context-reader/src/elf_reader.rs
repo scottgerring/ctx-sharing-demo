@@ -27,7 +27,7 @@ pub fn find_custom_labels_symbol(path: &Path) -> Result<SymbolInfo> {
 
     // Determine if this is the main executable or a shared library
     let is_main_executable = elf.header.e_type == goblin::elf::header::ET_EXEC
-        || elf.header.e_type == goblin::elf::header::ET_DYN; // PIE executables are ET_DYN
+        || elf.header.e_type == goblin::elf::header::ET_DYN; // Position independent executables (PIE) are actually ET_DYN ...
 
     Ok(SymbolInfo {
         current_set_symbol,

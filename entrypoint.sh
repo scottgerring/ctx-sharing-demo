@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
 
-echo "=== Starting async-web and context-reader demo ==="
-
 # Start async-web in the background with custom labels enabled
 echo "Starting async-web server..."
 /usr/local/bin/async-web --writer=custom &
@@ -15,8 +13,6 @@ sleep 3
 
 # Start context-reader to monitor async-web
 echo "Starting context-reader to monitor PID $ASYNC_WEB_PID..."
-echo "Reading context labels every 1 second..."
-echo "=========================================="
 
 # Run context-reader in the foreground
 # This will keep the container running and show output
