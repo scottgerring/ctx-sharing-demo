@@ -3,14 +3,17 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-mod elf_reader;
+// Generic TLS symbol discovery infrastructure
+#[cfg(target_os = "linux")]
+mod tls_symbols;
 
+// Application-specific modules
+#[cfg(target_os = "linux")]
+mod custom_labels;
 #[cfg(target_os = "linux")]
 mod label_parser;
 #[cfg(target_os = "linux")]
 mod output;
-#[cfg(target_os = "linux")]
-mod process;
 #[cfg(target_os = "linux")]
 mod tls_reader;
 
@@ -55,16 +58,16 @@ fn run(args: Args) -> Result<()> {
 
     info!("Monitoring process {} ({})", args.pid, proc.stat()?.comm);
 
-    // We should be able to find the binary that's running, so we can find its symbols.
-    let binary_path = process::find_custom_labels_binary(args.pid)
+    // Find the library (executable or .so) containing custom-labels symbols
+    // This will scan all loaded libraries and ensure exactly one has the symbols
+    let library = custom_labels::find_custom_labels(args.pid)
         .context("Failed to find custom-labels library or executable")?;
 
-    info!("Found custom-labels binary: {}", binary_path.display());
-
-    // Try find the symbols in the binary of the process. This is using goblin
-    // to hunt around in the symbol tables. If this fails, we can't do much,
-    let symbol_info = elf_reader::find_custom_labels_symbol(&binary_path)
-        .context("Failed to resolve custom-labels symbols")?;
+    info!(
+        "Found custom-labels in: {} (TLS location: {:?})",
+        library.path.display(),
+        library.tls_location
+    );
 
     let interval = Duration::from_millis(args.interval);
     let mut iteration = 0u64;
@@ -82,7 +85,7 @@ fn run(args: Args) -> Result<()> {
         }
 
         // Read labels from all threads
-        let results = tls_reader::read_all_threads(args.pid, &symbol_info)
+        let results = tls_reader::read_all_threads(args.pid, &library)
             .context("Failed to read thread labels")?;
 
         // Check if we found any labels

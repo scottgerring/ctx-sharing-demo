@@ -1,0 +1,202 @@
+///
+/// Generic TLS (Thread-Local Storage) variable accessor for Linux processes.
+/// Provides architecture-aware TLS address calculation independent of any
+/// specific application logic.
+///
+use anyhow::{Context, Result};
+use nix::unistd::Pid;
+use tracing::debug;
+
+use super::memory::read_memory;
+
+/// Describes where a TLS variable is located
+#[derive(Debug, Clone)]
+pub enum TlsLocation {
+    /// TLS in main executable (static offset from thread pointer)
+    MainExecutable { offset: usize },
+    /// TLS in shared library (via DTV lookup)
+    SharedLibrary { module_id: usize, offset: usize },
+}
+
+/// Get the memory address of a TLS variable in a specific thread
+pub fn get_tls_variable_address(pid: i32, tid: i32, location: &TlsLocation) -> Result<usize> {
+    match location {
+        TlsLocation::MainExecutable { offset } => {
+            get_tls_via_static_offset(tid, *offset)
+        }
+        TlsLocation::SharedLibrary { module_id, offset } => {
+            get_tls_via_dtv(pid, tid, *module_id, *offset)
+        }
+    }
+}
+
+/// Get TLS address for main executable using static offset
+fn get_tls_via_static_offset(tid: i32, tls_offset: usize) -> Result<usize> {
+    let thread_pointer = get_thread_pointer(tid)?;
+
+    // The TLS layout differs between architectures:
+    //
+    // x86-64 uses TLS variant II:
+    //   - Thread pointer (fs_base) points to the thread control block (TCB)
+    //   - TLS variables are at NEGATIVE offsets from the thread pointer
+    //   - Formula: tls_addr = thread_pointer - tls_offset
+    //
+    // aarch64 uses TLS variant I:
+    //   - Thread pointer (TPIDR_EL0) points to the Thread Control Block (TCB)
+    //   - TCB is 16 bytes (2 pointers) on aarch64
+    //   - TLS variables are located after the TCB
+    //   - Formula: tls_addr = thread_pointer + TCB_SIZE + tls_offset
+
+    #[cfg(target_arch = "x86_64")]
+    let tls_addr = thread_pointer.wrapping_sub(tls_offset);
+
+    #[cfg(target_arch = "aarch64")]
+    let tls_addr = {
+        const TCB_SIZE: usize = 16;
+        thread_pointer
+            .wrapping_add(TCB_SIZE)
+            .wrapping_add(tls_offset)
+    };
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let tls_addr = {
+        anyhow::bail!("Unsupported architecture for TLS calculation");
+    };
+
+    Ok(tls_addr)
+}
+
+/// Get TLS address for shared library using DTV (Dynamic Thread Vector)
+fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> Result<usize> {
+    let thread_pointer = get_thread_pointer(tid)?;
+
+    // Read the DTV pointer from the thread control block
+    // The DTV location differs by architecture:
+    // - x86-64: DTV pointer is at thread_pointer + 0 (first word of TCB)
+    // - aarch64: DTV pointer is at thread_pointer - 8 (before TCB)
+
+    #[cfg(target_arch = "x86_64")]
+    let dtv_ptr_addr = thread_pointer;
+
+    #[cfg(target_arch = "aarch64")]
+    let dtv_ptr_addr = thread_pointer.wrapping_sub(8);
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let dtv_ptr_addr = {
+        anyhow::bail!("Unsupported architecture for DTV access");
+    };
+
+    // Read DTV pointer (pointer-sized value)
+    const POINTER_SIZE: usize = std::mem::size_of::<usize>();
+    let mut dtv_ptr_bytes = [0u8; POINTER_SIZE];
+    read_memory(pid, dtv_ptr_addr, &mut dtv_ptr_bytes)?;
+    let dtv_ptr = usize::from_ne_bytes(dtv_ptr_bytes);
+
+    debug!("DTV pointer: {:#x}", dtv_ptr);
+
+    if dtv_ptr == 0 {
+        anyhow::bail!("DTV pointer is null");
+    }
+
+    // DTV layout:
+    // dtv[0] = generation counter (not used here)
+    // dtv[1] = first module's TLS block
+    // dtv[module_id] = this module's TLS block
+    //
+    // Each entry is a pointer
+    let dtv_entry_addr = dtv_ptr + (module_id * POINTER_SIZE);
+
+    debug!("Reading DTV entry at {:#x} for module {}", dtv_entry_addr, module_id);
+
+    // Read the pointer to this module's TLS block
+    let mut tls_block_ptr_bytes = [0u8; POINTER_SIZE];
+    read_memory(pid, dtv_entry_addr, &mut tls_block_ptr_bytes)?;
+    let tls_block = usize::from_ne_bytes(tls_block_ptr_bytes);
+
+    if tls_block == 0 {
+        anyhow::bail!("TLS block pointer is null for module {}", module_id);
+    }
+
+    debug!("TLS block for module {}: {:#x}", module_id, tls_block);
+
+    // Final address is TLS block base + symbol offset
+    let tls_addr = tls_block + tls_offset;
+
+    Ok(tls_addr)
+}
+
+/// Get the thread pointer register value for a thread
+/// - x86-64: FS_BASE register
+/// - aarch64: TPIDR_EL0 register
+fn get_thread_pointer(tid: i32) -> Result<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        get_fs_base(tid)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        get_tpidr(tid)
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        anyhow::bail!("Unsupported architecture");
+    }
+}
+
+/// Get FS_BASE register on x86-64 (thread pointer)
+#[cfg(target_arch = "x86_64")]
+fn get_fs_base(tid: i32) -> Result<usize> {
+    use nix::sys::ptrace;
+
+    let thread_pid = Pid::from_raw(tid);
+
+    // fs_base is at offset 0x1f8 in the user struct on x86-64
+    const FS_BASE_OFFSET: i64 = 0x1f8;
+
+    let value = ptrace::read(thread_pid, FS_BASE_OFFSET as *mut _)
+        .context("Failed to read fs_base register")?;
+
+    Ok(value as usize)
+}
+
+/// Get TPIDR_EL0 register on aarch64 (thread pointer)
+#[cfg(target_arch = "aarch64")]
+fn get_tpidr(tid: i32) -> Result<usize> {
+    // On arm64, the register in question is TPIDR_EL0
+    // This is part of the NT_ARM_TLS regset (regset 0x401)
+    const NT_ARM_TLS: i32 = 0x401;
+
+    // TPIDR is an 8-byte value
+    let mut tpidr_buf = [0u8; 8];
+
+    // Use libc directly for ptrace with GETREGSET
+    #[repr(C)]
+    struct iovec {
+        iov_base: *mut libc::c_void,
+        iov_len: libc::size_t,
+    }
+
+    let mut iov = iovec {
+        iov_base: tpidr_buf.as_mut_ptr() as *mut libc::c_void,
+        iov_len: tpidr_buf.len(),
+    };
+
+    let result = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGSET,
+            tid,
+            NT_ARM_TLS as libc::c_ulong,
+            &mut iov as *mut _ as *mut libc::c_void,
+        )
+    };
+
+    if result == -1 {
+        let err = std::io::Error::last_os_error();
+        anyhow::bail!("Failed to read TPIDR_EL0 register: {}", err);
+    }
+
+    let tpidr = u64::from_ne_bytes(tpidr_buf);
+    Ok(tpidr as usize)
+}
