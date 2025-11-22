@@ -7,7 +7,7 @@ use std::fs;
 use goblin::elf::Elf;
 use tracing::info;
 
-use crate::tls_symbols::process::{find_symbols_in_process, LoadedTlsSymbol};
+use crate::tls_symbols::process::{find_known_symbols_in_process, LoadedTlsSymbol};
 
 // Custom labels symbol names
 pub const CUSTOM_LABELS_CURRENT_SET: &str = "custom_labels_current_set";
@@ -29,7 +29,7 @@ const EXPECTED_ABI_VERSION: u32 = 1;
 pub fn find_custom_labels(pid: i32) -> Result<LoadedTlsSymbol> {
     let required_symbols = &[CUSTOM_LABELS_CURRENT_SET, CUSTOM_LABELS_ABI_VERSION];
 
-    let found = find_symbols_in_process(pid, required_symbols)
+    let found = find_known_symbols_in_process(pid, required_symbols)
         .context("Failed to find custom labels symbols")?;
 
     // Validate ABI version
@@ -56,11 +56,13 @@ pub fn find_custom_labels(pid: i32) -> Result<LoadedTlsSymbol> {
 
 /// Read and validate the custom labels ABI version from found symbols
 fn read_abi_version(found: &crate::tls_symbols::process::FoundSymbols) -> Result<u32> {
-    let abi_sym = found
+    let abi_entry = found
         .symbol_info
         .symbols
         .get(CUSTOM_LABELS_ABI_VERSION)
         .ok_or_else(|| anyhow::anyhow!("ABI version symbol not found"))?;
+
+    let abi_sym = &abi_entry.sym;
 
     // The symbol should be 4 bytes
     if abi_sym.st_size != 4 {

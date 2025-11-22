@@ -21,16 +21,16 @@ pub enum TlsLocation {
 /// Get the memory address of a TLS variable in a specific thread
 pub fn get_tls_variable_address(pid: i32, tid: i32, location: &TlsLocation) -> Result<usize> {
     match location {
-        TlsLocation::MainExecutable { offset } => {
-            get_tls_via_static_offset(tid, *offset)
-        }
+        TlsLocation::MainExecutable { offset } => get_tls_via_static_offset(tid, *offset),
         TlsLocation::SharedLibrary { module_id, offset } => {
             get_tls_via_dtv(pid, tid, *module_id, *offset)
         }
     }
 }
 
-/// Get TLS address for main executable using static offset
+/// Get TLS address for main executable using static offset.
+/// This is the "Local Exec" relocation model, where we have a static
+/// offset from the thread pointer register.
 fn get_tls_via_static_offset(tid: i32, tls_offset: usize) -> Result<usize> {
     let thread_pointer = get_thread_pointer(tid)?;
 
@@ -67,6 +67,7 @@ fn get_tls_via_static_offset(tid: i32, tls_offset: usize) -> Result<usize> {
 }
 
 /// Get TLS address for shared library using DTV (Dynamic Thread Vector)
+/// This is the "Global Dynamic (GD)" relocation model.
 fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> Result<usize> {
     let thread_pointer = get_thread_pointer(tid)?;
 
@@ -99,14 +100,17 @@ fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> R
     }
 
     // DTV layout:
-    // dtv[0] = generation counter (not used here)
+    // dtv[0] = _ generation counter
     // dtv[1] = first module's TLS block
     // dtv[module_id] = this module's TLS block
     //
     // Each entry is a pointer
     let dtv_entry_addr = dtv_ptr + (module_id * POINTER_SIZE);
 
-    debug!("Reading DTV entry at {:#x} for module {}", dtv_entry_addr, module_id);
+    debug!(
+        "Reading DTV entry at {:#x} for module {}",
+        dtv_entry_addr, module_id
+    );
 
     // Read the pointer to this module's TLS block
     let mut tls_block_ptr_bytes = [0u8; POINTER_SIZE];
@@ -114,7 +118,10 @@ fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> R
     let tls_block = usize::from_ne_bytes(tls_block_ptr_bytes);
 
     if tls_block == 0 {
-        anyhow::bail!("TLS block pointer is null for module {}", module_id);
+        anyhow::bail!(
+            "TLS block pointer is null for module {}. This may be an Initial Exec (IE) relocation that we don't support yet!",
+            module_id
+        );
     }
 
     debug!("TLS block for module {}: {:#x}", module_id, tls_block);
