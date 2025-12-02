@@ -238,7 +238,7 @@ name = "async-web"
 version = "0.1.0"
 dependencies = [
  "actix-web",
- "custom-labels",
+ "custom-labels 0.4.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "datadog-opentelemetry",
  "dd-trace",
  "opentelemetry",
@@ -512,6 +512,16 @@ dependencies = [
 [[package]]
 name = "custom-labels"
 version = "0.4.4"
+dependencies = [
+ "bindgen",
+ "cc",
+ "libc",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "custom-labels"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd1c8a4320177bfad0514f5ee9525499030e2d48e6da0c2047da4a782190ce2"
 dependencies = [
@@ -564,7 +574,7 @@ dependencies = [
 name = "datadog-opentelemetry"
 version = "0.0.1"
 dependencies = [
- "custom-labels",
+ "custom-labels 0.4.4",
  "data-pipeline",
  "datadog-opentelemetry-mappings",
  "datadog-trace-utils",
