@@ -4,6 +4,8 @@
 //!
 //! This library provides Rust bindings to [v1 of the Custom Labels ABI](../custom-labels-v1.md).
 //!
+//! For the V2 format with trace context and inline values, see the [`v2`] module.
+//!
 //! It allows time ranges within a thread's execution to be annotated with labels (key/value pairs) in such a way
 //! that the labels are visible to a CPU profiler that may
 //! interrupt the running process at any time. The profiler can then report the labels
@@ -434,6 +436,8 @@ where
         f()
     }
 }
+
+pub mod v2;
 
 pub mod asynchronous {
     use pin_project_lite::pin_project;

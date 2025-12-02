@@ -7,4 +7,7 @@
 {
   custom_labels_abi_version;
   custom_labels_current_set;
+  custom_labels_abi_version_v2;
+  custom_labels_current_ref_v2;
+  custom_labels_current_set_v2;
 };

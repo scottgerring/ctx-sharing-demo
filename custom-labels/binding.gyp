@@ -25,7 +25,9 @@
             "sources": [
                 "js/addon.c",
                 "js/addon_node.c",
-                "src/customlabels.c"
+                "src/customlabels.c",
+                "src/customlabels_v2_process.c",
+                "src/customlabels_v2_thread.c"
             ],
         }
     ]
