@@ -71,6 +71,10 @@ impl RecordBuilder {
     }
 
     pub fn build(self) -> Record {
+        // Set valid = 1 to indicate this record is ready to be read
+        unsafe {
+            (*self.raw.as_ptr()).valid = 1;
+        }
         let record = Record { raw: self.raw };
         std::mem::forget(self);
         record
@@ -253,71 +257,4 @@ where
             .expect("failed to set attribute");
     }
     with_record(builder.build(), f)
-}
-
-pub mod asynchronous {
-    use super::*;
-    use pin_project_lite::pin_project;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::task::{Context as TaskContext, Poll};
-
-    pin_project! {
-        pub struct LabeledV2<Fut> {
-            #[pin]
-            inner: Fut,
-            record: Option<Record>,
-        }
-    }
-
-    impl<Fut, Ret> Future for LabeledV2<Fut>
-    where
-        Fut: Future<Output = Ret>,
-    {
-        type Output = Ret;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-            let this = self.project();
-
-            if let Some(record) = this.record.take() {
-                let old = attach_record(None, record);
-                let result = this.inner.poll(cx);
-
-                let current = if let Some(old_record) = old {
-                    attach_record(None, old_record)
-                } else {
-                    clear_current_record()
-                };
-                if result.is_pending() {
-                    *this.record = current;
-                }
-
-                result
-            } else {
-                this.inner.poll(cx)
-            }
-        }
-    }
-
-    pub trait LabelV2: Sized {
-        fn with_record_v2(self, record: Record) -> LabeledV2<Self>;
-        fn with_attr_v2<V: AsRef<[u8]>>(self, key: KeyHandle, value: V) -> LabeledV2<Self>;
-    }
-
-    impl<Fut: Future> LabelV2 for Fut {
-        fn with_record_v2(self, record: Record) -> LabeledV2<Self> {
-            LabeledV2 {
-                inner: self,
-                record: Some(record),
-            }
-        }
-
-        fn with_attr_v2<V: AsRef<[u8]>>(self, key: KeyHandle, value: V) -> LabeledV2<Self> {
-            let mut builder = RecordBuilder::new();
-            builder
-                .set_attr(key, value.as_ref())
-                .expect("failed to set attribute");
-            self.with_record_v2(builder.build())
-        }
-    }
 }

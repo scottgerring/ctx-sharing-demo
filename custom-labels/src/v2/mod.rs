@@ -55,7 +55,7 @@ pub mod thread;
 
 // Re-export commonly used types at the v2 level
 pub use thread::{
-    asynchronous, attach_record, clear_current_record, get_current_record, max_record_size,
+    attach_record, clear_current_record, get_current_record, max_record_size,
     release_context, set_current_record, setup, with_attr, with_attrs, with_record,
     with_trace_and_attrs, Record, RecordBuilder,
 };

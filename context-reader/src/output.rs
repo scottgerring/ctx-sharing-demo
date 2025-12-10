@@ -1,8 +1,7 @@
-use crate::label_parser::LabelValue;
-use crate::tls_reader::ThreadResult;
+use crate::tls_reader_trait::{LabelValue, ThreadResult};
 use tracing::info;
 
-pub fn print_iteration(iteration: u64, results: &[ThreadResult]) {
+pub fn print_iteration(iteration: u64, reader_name: &str, results: &[ThreadResult]) {
     let mut found_threads = Vec::new();
     let mut empty_threads = Vec::new();
     let mut not_found_threads = Vec::new();
@@ -43,7 +42,8 @@ pub fn print_iteration(iteration: u64, results: &[ThreadResult]) {
             .collect();
 
         info!(
-            "iteration = {}, thread = {}, context_labels = [{}]",
+            "[{}] iteration = {}, thread = {}, labels = [{}]",
+            reader_name,
             iteration,
             tid,
             label_strs.join(", ")
@@ -53,16 +53,17 @@ pub fn print_iteration(iteration: u64, results: &[ThreadResult]) {
     // Print threads with empty labelsets
     for tid in empty_threads {
         info!(
-            "iteration = {}, thread = {}, context_labels = []",
-            iteration, tid
+            "[{}] iteration = {}, thread = {}, labels = []",
+            reader_name, iteration, tid
         );
     }
 
-    // Print not found threads
+    // Print not found threads (only at debug level to reduce noise)
     if !not_found_threads.is_empty() {
         let tid_strs: Vec<String> = not_found_threads.iter().map(|t| t.to_string()).collect();
-        info!(
-            "iteration = {}, not_found = threads [{}]",
+        tracing::debug!(
+            "[{}] iteration = {}, not_found = threads [{}]",
+            reader_name,
             iteration,
             tid_strs.join(", ")
         );

@@ -1,3 +1,8 @@
+///
+/// A minimal protobuf implementation of what we need for encoding
+/// process-context and not much more.
+///
+
 use crate::model::{Error, KeyValue, ProcessContext, Result, KEY_VALUE_LIMIT, UINT14_MAX};
 
 /// Wire type for length-delimited fields (strings, nested messages)

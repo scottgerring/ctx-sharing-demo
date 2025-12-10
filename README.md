@@ -1,15 +1,22 @@
 # Context Sharing Demo
 
-This is a project that shows thread-local context stored by a Rust webserver using extensions to `dd-trace-rs` and `opentelemetry-rust`, and read out from out of process following
-the [polarsignals custom labels TL storage format](https://github.com/polarsignals/custom-labels/tree/master). It's
-made up of the following bits:
+This is a project that shows thread-local context stored by a Rust webserver using extensions to `dd-trace-rs` and `opentelemetry-rust`.
+TLS data is stored using both the  [polarsignals custom labels TL storage format](https://github.com/polarsignals/custom-labels/tree/master), and our 'v2' TLS format.
+
+**NOTE: all of this is **Linux Only!**. There is a `.devcontainer` in the root of the repository to make it easier to work on this on 
+non-linux machines in for instance VSCode or RustRover.**
+
+It's made up of the following bits:
+
+### Foundational Libraries
+* [process-context](process-context) - a minimal implementation of the **Process Context** OTEP, which we use to share TLS configuration information with the reader for our v2 format
+* [custom-labels](custom-labels) - PolarSignal's custom labels library, extended to also include our 'v2' TLS format. Includes a small bin that shows 
 
 ### A Demo App
 
 * [opentelemetry-rust context-observer-test fork](https://github.com/bantonsson/opentelemetry-rust/tree/ban/context-observer-test) - Björn's context observer branch gives us the basic hook we need to capture what's happening in OTel. We will have to work to get this upstreamed before we can update dd-trace-rs.
 * [dd-trace-rs context-observer-test fork](https://github.com/scottgerring/dd-trace-rs/tree/scottgerring/context-observer-test) - add an implementation of the context observer that can write to either the polarsignal's label storage (and thus process TL), _or_, to stdout. This is relatively _hackety hack_, but I am happy to clean it up into a serious contribution if it is helpful when we get there!
 * [async-web](async-web) - This is the Rust app - both a HTTP API, and a background thread pool that pushes traffic through it to generate Interesting Data. It is instrumented with [dd-trace-rs] with the context observation turned on, and some magical build args sprinkled in to ensure that the TL symbols are published in the resulting binary despite its static linking.
-
 
 ### A Reader
 * [context-reader](context-reader) - An out of process reader that, given a PID, periodically polls for TL labels and dumps them out to stdout. This is parsing the ELF _statically_ to find the symbols, but shouldn't be too difficult to modify to do it out of process memory. It uses `ptrace` to periodically stop the process and read out the TLs.
@@ -20,7 +27,8 @@ When you fire it up with, you will see the propagation of TL context from the sa
 ![Demo App Screenshot](docs/screenshot.jpeg)
 
 ## How to use this?
-To make my life easier, the demo app takes a local path dependency on `dd-trace-rs`. You'll need to [clone the relevant branch](https://github.com/scottgerring/dd-trace-rs/tree/scottgerring/context-observer-test)  into this directory for this to work. I will clean this up when other people care!
+To make my life easier, the demo app takes a local path dependency on `dd-trace-rs`. You'll need to [clone the relevant branch](https://github.com/scottgerring/dd-trace-rs/tree/scottgerring/context-observer-test) 
+into this directory for this to work. I will clean this up when other people care!
 
 # Observations
 * This all depends on getting the context observer into otel-rust, which _should_ be relatively uncontroversial, but may not be.

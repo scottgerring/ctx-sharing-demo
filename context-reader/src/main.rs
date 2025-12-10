@@ -1,21 +1,22 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 // Generic TLS symbol discovery infrastructure
 // Note: elf_reader can work cross-platform for reading ELF files
 mod tls_symbols;
 
-// Application-specific modules
+// TLS reader trait and implementations
 #[cfg(target_os = "linux")]
-mod custom_labels;
+mod tls_reader_trait;
 #[cfg(target_os = "linux")]
-mod label_parser;
+mod v1_reader;
+#[cfg(target_os = "linux")]
+mod v2_reader;
+
+// Output formatting
 #[cfg(target_os = "linux")]
 mod output;
-#[cfg(target_os = "linux")]
-mod tls_reader;
 
 #[derive(Parser, Debug)]
 #[command(name = "context-reader")]
@@ -64,11 +65,29 @@ fn main() -> Result<()> {
 fn run(args: Args) -> Result<()> {
     use anyhow::Context;
     use std::time::Duration;
+    use tls_reader_trait::{ThreadResult, TlsReader};
+    use tracing::info;
 
     // Validate process exists
     let proc = procfs::process::Process::new(args.pid).context("Failed to find process")?;
 
     info!("Monitoring process {} ({})", args.pid, proc.stat()?.comm);
+
+    // Try to read process-context from the target process
+    match process_context::read_process_context_from_pid(args.pid) {
+        Ok(ctx) => {
+            info!("Found process-context with {} resources:", ctx.resources.len());
+            for kv in &ctx.resources {
+                info!("  {} = {}", kv.key, kv.value);
+            }
+        }
+        Err(process_context::Error::NotFound) => {
+            info!("No process-context found in target process");
+        }
+        Err(e) => {
+            info!("Failed to read process-context: {}", e);
+        }
+    }
 
     // If --print-tls is set, print TLS symbols (and optionally OBJECT symbols) and exit
     if args.print_tls {
@@ -80,16 +99,34 @@ fn run(args: Args) -> Result<()> {
         return print_symbols(args.pid, filter, args.include_symtab);
     }
 
-    // Find the library (executable or .so) containing custom-labels symbols
-    // This will scan all loaded libraries and ensure exactly one has the symbols
-    let library = custom_labels::find_custom_labels(args.pid)
-        .context("Failed to find custom-labels library or executable")?;
+    // Try to set up readers - collect all that succeed
+    let mut readers: Vec<Box<dyn TlsReader>> = Vec::new();
 
-    info!(
-        "Found custom-labels in: {} (TLS location: {:?})",
-        library.path.display(),
-        library.tls_location
-    );
+    match v1_reader::V1Reader::try_setup(args.pid) {
+        Ok(reader) => {
+            info!("V1 reader initialized successfully");
+            readers.push(Box::new(reader));
+        }
+        Err(e) => {
+            info!("V1 reader not available: {}", e);
+        }
+    }
+
+    match v2_reader::V2Reader::try_setup(args.pid) {
+        Ok(reader) => {
+            info!("V2 reader initialized successfully");
+            readers.push(Box::new(reader));
+        }
+        Err(e) => {
+            info!("V2 reader not available: {}", e);
+        }
+    }
+
+    if readers.is_empty() {
+        anyhow::bail!("No TLS readers could be initialized for process {}", args.pid);
+    }
+
+    info!("Initialized {} TLS reader(s)", readers.len());
 
     let interval = Duration::from_millis(args.interval);
     let mut iteration = 0u64;
@@ -99,23 +136,33 @@ fn run(args: Args) -> Result<()> {
     loop {
         iteration += 1;
 
-        // Hackety hack - try check if process still exists
-        // There's gotta be a better way to do this
+        // Check if process still exists
         if procfs::process::Process::new(args.pid).is_err() {
             println!("\nProcess exited! finishing up.");
             break;
         }
 
-        // Read labels from all threads
-        let results = tls_reader::read_all_threads(args.pid, &library)
-            .context("Failed to read thread labels")?;
+        let mut any_labels_found = false;
 
-        // Check if we found any labels
-        let has_labels = results
-            .iter()
-            .any(|r| matches!(r, tls_reader::ThreadResult::Found { .. }));
+        // Read from each reader and print results
+        for reader in &readers {
+            match reader.read_all_threads(args.pid) {
+                Ok(results) => {
+                    let has_labels = results
+                        .iter()
+                        .any(|r| matches!(r, ThreadResult::Found { .. }));
+                    if has_labels {
+                        any_labels_found = true;
+                    }
+                    output::print_iteration(iteration, reader.name(), &results);
+                }
+                Err(e) => {
+                    info!("[{}] Error reading threads: {}", reader.name(), e);
+                }
+            }
+        }
 
-        if !has_labels {
+        if !any_labels_found {
             empty_iterations += 1;
             if empty_iterations >= MAX_EMPTY_ITERATIONS {
                 println!("\nNo labels found for {} consecutive iterations, process appears to be shutting down. Exiting.", MAX_EMPTY_ITERATIONS);
@@ -124,9 +171,6 @@ fn run(args: Args) -> Result<()> {
         } else {
             empty_iterations = 0;
         }
-
-        // Format and print output
-        output::print_iteration(iteration, &results);
 
         std::thread::sleep(interval);
     }

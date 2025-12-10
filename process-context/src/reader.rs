@@ -173,11 +173,189 @@ pub fn read_process_context() -> Result<ProcessContext> {
     encoding::decode(payload)
 }
 
-// Non-Linux stub implementation
+/// Find the OTEL_CTX mapping in /proc/<pid>/maps for another process
+#[cfg(target_os = "linux")]
+fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
+    use tracing::{debug, info};
+
+    let expected_size = expected_mapping_size()
+        .ok_or_else(|| Error::MappingFailed("failed to get page size".to_string()))?;
+
+    debug!(pid = pid, expected_size = expected_size, "Searching for OTEL_CTX mapping");
+
+    let maps_path = format!("/proc/{}/maps", pid);
+    let file = File::open(&maps_path)?;
+    let reader = BufReader::new(file);
+
+    let mut candidates: Vec<(usize, String)> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+
+        if !is_otel_mapping_candidate(&line, expected_size) {
+            continue;
+        }
+
+        debug!(line = %line, "Found candidate mapping (right size + read-only)");
+
+        // First check if it's named
+        if is_named_otel_mapping(&line) {
+            if let Some(addr) = parse_mapping_start(&line) {
+                info!(addr = format!("0x{:x}", addr), "Found named OTEL_CTX mapping");
+                return Ok(addr);
+            }
+        }
+
+        // Collect unnamed anonymous mappings as candidates
+        // Check if the line has no path (anonymous mapping)
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // /proc/pid/maps format: address perms offset dev inode [pathname]
+        // Anonymous mappings have 5 fields (no pathname)
+        // Skip special kernel mappings like [vvar], [vdso], [stack], [heap]
+        let pathname = parts.get(5).map(|s| *s).unwrap_or("");
+        let is_special_kernel = pathname.starts_with('[') && !pathname.contains("anon:OTEL");
+        let is_file_backed = !pathname.is_empty() && !pathname.starts_with('[');
+        let is_true_anonymous = parts.len() <= 5 || pathname.is_empty();
+
+        if is_special_kernel {
+            debug!(pathname = pathname, "Skipping special kernel mapping");
+            continue;
+        }
+
+        if is_file_backed {
+            debug!(pathname = pathname, "Skipping file-backed mapping");
+            continue;
+        }
+
+        if is_true_anonymous {
+            if let Some(addr) = parse_mapping_start(&line) {
+                debug!(addr = format!("0x{:x}", addr), "Found anonymous candidate");
+                candidates.push((addr, line.clone()));
+            }
+        }
+    }
+
+    info!(count = candidates.len(), "Found anonymous mapping candidates");
+    for (addr, line) in &candidates {
+        debug!(addr = format!("0x{:x}", addr), line = %line, "Candidate mapping");
+    }
+
+    // Return first candidate - caller will verify signature
+    if let Some((addr, _)) = candidates.first() {
+        return Ok(*addr);
+    }
+
+    Err(Error::NotFound)
+}
+
+/// Read the process context from another process by PID.
+///
+/// This searches `/proc/<pid>/maps` for an OTEL_CTX mapping and reads its contents
+/// using `process_vm_readv`.
+///
+/// # Returns
+///
+/// Returns the decoded `ProcessContext` if found, or an error if:
+/// - No OTEL_CTX mapping was found
+/// - Failed to read from the target process
+/// - The mapping has an invalid signature or version
+/// - The payload failed to decode
+#[cfg(target_os = "linux")]
+pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
+    use libc::{c_void, iovec, pid_t, process_vm_readv};
+    use std::mem::size_of;
+
+    let mapping_addr = find_otel_mapping_for_pid(pid)?;
+
+    // Read the header from the remote process
+    let mut header_buf = [0u8; size_of::<MappingHeader>()];
+    let local_iov = iovec {
+        iov_base: header_buf.as_mut_ptr() as *mut c_void,
+        iov_len: header_buf.len(),
+    };
+    let remote_iov = iovec {
+        iov_base: mapping_addr as *mut c_void,
+        iov_len: header_buf.len(),
+    };
+
+    let nread = unsafe { process_vm_readv(pid as pid_t, &local_iov, 1, &remote_iov, 1, 0) };
+
+    if nread < 0 {
+        return Err(Error::MappingFailed(format!(
+            "process_vm_readv failed for header: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    if nread as usize != header_buf.len() {
+        return Err(Error::MappingFailed(format!(
+            "short read for header: {} of {}",
+            nread,
+            header_buf.len()
+        )));
+    }
+
+    // Parse the header
+    let signature: [u8; 8] = header_buf[0..8].try_into().unwrap();
+    let version = u32::from_ne_bytes(header_buf[8..12].try_into().unwrap());
+    let payload_size = u32::from_ne_bytes(header_buf[12..16].try_into().unwrap());
+    let payload_ptr = usize::from_ne_bytes(header_buf[24..24 + size_of::<usize>()].try_into().unwrap());
+
+    // Validate signature
+    if signature != *SIGNATURE {
+        return Err(Error::DecodingFailed("invalid signature".to_string()));
+    }
+
+    // Validate version
+    if version != PROCESS_CTX_VERSION {
+        return Err(Error::DecodingFailed(format!(
+            "unsupported version: {} (expected {})",
+            version, PROCESS_CTX_VERSION
+        )));
+    }
+
+    // Read the payload from the remote process
+    let mut payload_buf = vec![0u8; payload_size as usize];
+    let local_iov = iovec {
+        iov_base: payload_buf.as_mut_ptr() as *mut c_void,
+        iov_len: payload_buf.len(),
+    };
+    let remote_iov = iovec {
+        iov_base: payload_ptr as *mut c_void,
+        iov_len: payload_buf.len(),
+    };
+
+    let nread = unsafe { process_vm_readv(pid as pid_t, &local_iov, 1, &remote_iov, 1, 0) };
+
+    if nread < 0 {
+        return Err(Error::MappingFailed(format!(
+            "process_vm_readv failed for payload: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    if nread as usize != payload_buf.len() {
+        return Err(Error::MappingFailed(format!(
+            "short read for payload: {} of {}",
+            nread,
+            payload_buf.len()
+        )));
+    }
+
+    // Decode the payload
+    encoding::decode(&payload_buf)
+}
+
+// Non-Linux stub implementations
 #[cfg(not(target_os = "linux"))]
 use crate::model::{Error, ProcessContext, Result};
 
 #[cfg(not(target_os = "linux"))]
 pub fn read_process_context() -> Result<ProcessContext> {
+    Err(Error::PlatformNotSupported)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn read_process_context_from_pid(_pid: i32) -> Result<ProcessContext> {
     Err(Error::PlatformNotSupported)
 }

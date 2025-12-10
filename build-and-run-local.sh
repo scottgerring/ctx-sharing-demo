@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Set logging levels - reduce noise from elf_reader symbol scanning
+export RUST_LOG="${RUST_LOG:-info,context_reader::tls_symbols::elf_reader=warn}"
+
 # Build both projects first to avoid race conditions
 echo "Building async-web..."
 cd "async-web"
