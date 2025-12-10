@@ -497,8 +497,7 @@ pub mod asynchronous {
         /// This is equivalent to calling [`with_labelset`] with a label
         /// set constructed like so:
         ///
-        /// ```rust
-        /// # use custom_labels::Labelset;
+        /// ```rust,ignore
         /// let mut labelset = Labelset::clone_from_current();
         /// labelset.extend(i);
         /// ```

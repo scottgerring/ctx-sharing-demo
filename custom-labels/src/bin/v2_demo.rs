@@ -1,18 +1,47 @@
 use anyhow::Result;
-use custom_labels::v2::{self, ProcessConfigBuilder};
+use custom_labels::v2::{self, KeyHandle};
+use process_context::{tls::ProcessContextTlsExt, ProcessContext, ProcessContextWriter};
 use tracing::{info, Level};
+
+// Key indices - these define the key table layout
+const ROUTE_IDX: u8 = 0;
+const USER_ID_IDX: u8 = 1;
+
+// TLS configuration
+const MAX_RECORD_SIZE: u64 = 512;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
-    // Process-level setup: register keys and initialize.
-    // The tracing library would do this on load.
-    info!("initializing process config");
-    let mut config = ProcessConfigBuilder::new(512);  // max_record_size
-    let route_key = config.register_key("route")?;
-    let user_key = config.register_key("user_id")?;
-    config.init()?;
-    info!("process initialized with keys: route={}, user_id={}", route_key.index(), user_key.index());
+    // Set up process-context with service info and TLS configuration.
+    info!("Setting up process-context");
+    let ctx = ProcessContext::new()
+        // Standard OTEL resource attributes
+        .with_resource("service.name", "v2-demo")
+        .with_resource("service.version", "1.0.0")
+        .with_resource("service.instance.id", "demo-instance-001")
+        .with_resource("deployment.environment", "development")
+        // TLS key table configuration
+        .with_tls_config(
+            [
+                (ROUTE_IDX, "route"),
+                (USER_ID_IDX, "user_id"),
+            ],
+            MAX_RECORD_SIZE,
+        );
+
+    // Publish the process context (Linux only, no-op on other platforms)
+    let _writer = ProcessContextWriter::publish(&ctx);
+    info!("Process context published");
+
+    // Initialize custom-labels with max record size
+    info!("Initializing custom-labels v2 with max_record_size={}", MAX_RECORD_SIZE);
+    v2::setup(MAX_RECORD_SIZE);
+
+    // Create key handles from the defined indices
+    let route_key = KeyHandle::new(ROUTE_IDX);
+    let user_key = KeyHandle::new(USER_ID_IDX);
+    info!("Created key handles: route={}, user_id={}", route_key.index(), user_key.index());
 
     // Great! Now we're doing _actual context work_.
     // Imagine we've just entered a span ...
@@ -37,12 +66,6 @@ fn main() -> Result<()> {
     });
 
     // Span 123 is back again!
-    // You can imagine that we're calling this method with the fields referenced
-    // straight off of the context. Because the TL library in this instance can
-    // cache for us by the span_id key, the lambda would not be invoked, and the
-    // reattach devolves to a simple update of the TL to point to the cached context
-    // record.
-    // IRL we've not implemented the caching, but you get the point ...
     info!("Back into span 123!");
     let span_123_again_id = 123u64.to_be_bytes();
     v2::set_current_record(Some(&span_123_again_id), |b| {

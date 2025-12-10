@@ -2,15 +2,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/customlabels.c");
     println!("cargo:rerun-if-changed=src/customlabels.h");
     println!("cargo:rerun-if-changed=src/customlabels_v2.h");
-    println!("cargo:rerun-if-changed=src/customlabels_v2_process.h");
-    println!("cargo:rerun-if-changed=src/customlabels_v2_process.c");
     println!("cargo:rerun-if-changed=src/customlabels_v2_thread.h");
     println!("cargo:rerun-if-changed=src/customlabels_v2_thread.c");
     println!("cargo:rerun-if-changed=./dlist");
 
     cc::Build::new()
         .file("src/customlabels.c")
-        .file("src/customlabels_v2_process.c")
         .file("src/customlabels_v2_thread.c")
         .compile("customlabels");
 
@@ -19,11 +16,6 @@ fn main() {
     // dynamic-list is Linux-only
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-arg=-Wl,--dynamic-list=./dlist");
-
-    // let dlist_path = format!("{}/dlist", std::env::var("OUT_DIR").unwrap());
-    // std::fs::copy("./dlist", &dlist_path).unwrap();
-
-    // println!("cargo::metadata=dlist-path={}", dlist_path);
 
     // Generate bindings using bindgen
     let out_path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());

@@ -37,7 +37,14 @@ typedef struct {
 
 extern __thread custom_labels_v2_tl_record_t *custom_labels_current_set_v2;
 
-// Allocate a new TL record sized to max_record_size from ref_data
+// Initialize custom labels with the maximum record size.
+// Must be called once before using any other v2 functions.
+void custom_labels_v2_setup(uint64_t max_record_size);
+
+// Get the configured max record size.
+uint64_t custom_labels_v2_get_max_record_size(void);
+
+// Allocate a new TL record sized to max_record_size from setup()
 custom_labels_v2_tl_record_t *custom_labels_v2_record_new(void);
 
 // Free a TL record

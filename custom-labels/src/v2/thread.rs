@@ -1,8 +1,18 @@
 use std::ptr::NonNull;
 
-use super::process::{get_process_ref_data_ptr, KeyHandle};
-use super::{sys, Error, Result};
+use super::{sys, Error, KeyHandle, Result};
 use tracing::info;
+
+/// Initialize custom labels with the maximum record size.
+/// Must be called once before using any other v2 functions.
+pub fn setup(max_record_size: u64) {
+    unsafe { sys::custom_labels_v2_setup(max_record_size) }
+}
+
+/// Get the configured max record size.
+pub fn max_record_size() -> u64 {
+    unsafe { sys::custom_labels_v2_get_max_record_size() }
+}
 
 /// Builder for constructing an immutable Record.
 pub struct RecordBuilder {
@@ -104,15 +114,6 @@ impl Drop for Record {
     }
 }
 
-/// Ensure the current thread's ref_data TL points to the process global.
-fn ensure_thread_ref_data() {
-    let process_ptr = get_process_ref_data_ptr();
-    let current_ptr = unsafe { sys::custom_labels_v2_get_ref_data() };
-    if current_ptr != process_ptr {
-        unsafe { sys::custom_labels_v2_set_ref_data(process_ptr) };
-    }
-}
-
 /// Build and set a new record on the current thread via a lambda.
 /// The TL is set to null during the build, then set to the new record.
 /// Returns the previous record, if any.
@@ -127,8 +128,6 @@ pub fn set_current_record<F>(ctx_key_id: Option<&[u8; 8]>, f: F)
 where
     F: FnOnce(&mut RecordBuilder),
 {
-    ensure_thread_ref_data();
-
     // 1. Detach current record (TL becomes null during update; no stale reads!)
     unsafe { sys::custom_labels_v2_set_current_record(std::ptr::null_mut()) };
 
@@ -149,7 +148,6 @@ where
 /// The `ctx_key_id` parameter is reserved for future caching (e.g., span_id).
 #[allow(unused_variables)]
 pub fn attach_record(ctx_key_id: Option<&[u8; 8]>, record: Record) -> Option<Record> {
-    ensure_thread_ref_data();
     let old_ptr = unsafe { sys::custom_labels_v2_set_current_record(record.into_raw()) };
     unsafe { Record::from_raw(old_ptr) }
 }
@@ -157,7 +155,6 @@ pub fn attach_record(ctx_key_id: Option<&[u8; 8]>, record: Record) -> Option<Rec
 /// Clear the current record from the thread.
 /// Returns the previous record, if any.
 pub fn clear_current_record() -> Option<Record> {
-    ensure_thread_ref_data();
     let old_ptr = unsafe { sys::custom_labels_v2_set_current_record(std::ptr::null_mut()) };
     unsafe { Record::from_raw(old_ptr) }
 }

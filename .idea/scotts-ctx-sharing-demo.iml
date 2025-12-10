@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/context-reader/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/custom-labels/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/custom-labels/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry-mappings/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry-mappings/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry/examples/propagator/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry/examples/simple_tracing/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/datadog-opentelemetry/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/dd-trace-propagation/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/dd-trace-propagation/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/dd-trace-sampling/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/dd-trace/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/dd-trace-rs/dd-trace/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/process-context/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/context-reader/target" />
+      <excludeFolder url="file://$MODULE_DIR$/custom-labels/target" />
+      <excludeFolder url="file://$MODULE_DIR$/dd-trace-rs/target" />
+      <excludeFolder url="file://$MODULE_DIR$/process-context/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

@@ -1,21 +1,30 @@
 #include "customlabels_v2_thread.h"
-#include "customlabels_v2_process.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define BARRIER atomic_thread_fence(memory_order_seq_cst)
 
+// Process-global max record size, set via setup()
+static uint64_t g_max_record_size = 0;
+
 __attribute__((retain))
 __thread custom_labels_v2_tl_record_t *custom_labels_current_set_v2 = NULL;
 
+void custom_labels_v2_setup(uint64_t max_record_size) {
+    g_max_record_size = max_record_size;
+}
+
+uint64_t custom_labels_v2_get_max_record_size(void) {
+    return g_max_record_size;
+}
+
 custom_labels_v2_tl_record_t *custom_labels_v2_record_new(void) {
-    const custom_labels_v2_ref_data_t *ref = custom_labels_v2_get_ref_data();
-    if (!ref) {
-        return NULL;
+    if (g_max_record_size == 0) {
+        return NULL;  // setup() not called
     }
 
-    custom_labels_v2_tl_record_t *record = calloc(1, ref->max_record_size);
+    custom_labels_v2_tl_record_t *record = calloc(1, g_max_record_size);
     if (!record) {
         return NULL;
     }
@@ -58,11 +67,8 @@ int custom_labels_v2_record_set_attr(
         return -1;
     }
 
-    // NOTE: Looking up ref_data on every set_attr call is not optimal.
-    // A real implementation might cache this or pass it explicitly.
-    const custom_labels_v2_ref_data_t *ref = custom_labels_v2_get_ref_data();
-    if (!ref) {
-        return -1;
+    if (g_max_record_size == 0) {
+        return -1;  // setup() not called
     }
 
     // Calculate current offset by walking existing attrs
@@ -74,7 +80,7 @@ int custom_labels_v2_record_set_attr(
     }
 
     size_t needed = current_offset + 2 + value_length;
-    size_t available = ref->max_record_size - sizeof(custom_labels_v2_tl_record_t);
+    size_t available = g_max_record_size - sizeof(custom_labels_v2_tl_record_t);
 
     if (needed > available) {
         return -1;  // Buffer full, no realloc
