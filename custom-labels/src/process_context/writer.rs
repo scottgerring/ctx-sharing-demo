@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
-use crate::encoding;
+use super::encoding;
 #[cfg(target_os = "linux")]
-use crate::model::{Error, ProcessContext, Result, PROCESS_CTX_VERSION, SIGNATURE};
+use super::model::{Error, ProcessContext, Result, PROCESS_CTX_VERSION, SIGNATURE};
 
 #[cfg(target_os = "linux")]
 use std::ptr;
@@ -202,7 +202,7 @@ impl Drop for ProcessContextWriter {
 
 // Non-Linux stub implementation
 #[cfg(not(target_os = "linux"))]
-use crate::model::{Error, ProcessContext, Result};
+use super::model::{Error, ProcessContext, Result};
 
 #[cfg(not(target_os = "linux"))]
 pub struct ProcessContextWriter;

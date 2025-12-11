@@ -3,7 +3,7 @@
 /// process-context and not much more.
 ///
 
-use crate::model::{Error, KeyValue, ProcessContext, Result, KEY_VALUE_LIMIT, UINT14_MAX};
+use super::model::{Error, KeyValue, ProcessContext, Result, KEY_VALUE_LIMIT, UINT14_MAX};
 
 /// Wire type for length-delimited fields (strings, nested messages)
 const WIRE_TYPE_LEN: u8 = 2;

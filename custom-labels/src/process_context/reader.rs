@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
-use crate::encoding;
+use super::encoding;
 #[cfg(target_os = "linux")]
-use crate::model::{Error, ProcessContext, Result, PROCESS_CTX_VERSION, SIGNATURE};
+use super::model::{Error, ProcessContext, Result, PROCESS_CTX_VERSION, SIGNATURE};
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -348,7 +348,7 @@ pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
 
 // Non-Linux stub implementations
 #[cfg(not(target_os = "linux"))]
-use crate::model::{Error, ProcessContext, Result};
+use super::model::{Error, ProcessContext, Result};
 
 #[cfg(not(target_os = "linux"))]
 pub fn read_process_context() -> Result<ProcessContext> {

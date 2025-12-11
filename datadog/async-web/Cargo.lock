@@ -527,7 +527,6 @@ dependencies = [
  "cc",
  "libc",
  "pin-project-lite",
- "process-context",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
@@ -601,7 +600,6 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
- "process-context",
  "rand 0.8.5",
  "serde_json",
 ]
@@ -1803,14 +1801,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "process-context"
-version = "0.1.0"
-dependencies = [
- "libc",
- "tracing",
 ]
 
 [[package]]

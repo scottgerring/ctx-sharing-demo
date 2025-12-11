@@ -21,7 +21,7 @@
 	// "forwardPorts": [],
 
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "apt update && apt install libclang-19-dev librust-openssl-dev",
+	"postCreateCommand": "sudo apt update && sudo apt install libclang-19-dev librust-openssl-dev -y",
 
 	// Configure tool-specific properties.
   "customizations" : {

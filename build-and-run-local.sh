@@ -5,29 +5,29 @@ set -e
 export RUST_LOG="${RUST_LOG:-info,context_reader::tls_symbols::elf_reader=warn}"
 
 # Build both projects first to avoid race conditions
-echo "Building async-web..."
-cd "async-web"
+echo "Building context-writer"
+cd "context-writer"
 cargo build
 
 echo "Building context-reader..."
 cd "../context-reader"
 cargo build
 
-# Now start async-web in the background
-echo "Starting async-web server..."
-cd "../async-web"
-cargo run -- --writer=custom 2>&1 > /dev/null &
-ASYNC_WEB_PID=$!
+# Now start context-writer in the background
+echo "Starting context-writer..."
+cd "../context-writer"
+cargo run 2>&1 > /dev/null &
+WRITER_PID=$!
 
-echo "async-web started with PID: $ASYNC_WEB_PID"
+echo "context-writer started with PID: WRITER_PID"
 
-# Give async-web a moment to fully start up
-echo "Waiting for async-web to initialize..."
+# Give context-writer a moment to fully start up
+echo "Waiting for context-writer to initialize..."
 sleep 2
 
 # Start context-reader to monitor async-web
-echo "Starting context-reader to monitor PID $ASYNC_WEB_PID..."
+echo "Starting context-reader to monitor PID $WRITER_PID..."
 cd "../context-reader"
-cargo run -- "$ASYNC_WEB_PID" --interval 1000
+cargo run -- "$WRITER_PID" --interval 1000
 
 cd ..

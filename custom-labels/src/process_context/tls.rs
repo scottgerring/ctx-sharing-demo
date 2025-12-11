@@ -3,7 +3,7 @@
 //! This module provides extension methods for configuring thread-local
 //! context sharing (custom labels v2) metadata in the process context.
 
-use crate::ProcessContext;
+use super::ProcessContext;
 use tracing::info;
 
 /// Resource key for the TLS key table (stored as length-prefixed key names).

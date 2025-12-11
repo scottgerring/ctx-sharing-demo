@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use custom_labels::{process_context};
 
 // Generic TLS symbol discovery infrastructure
 // Note: elf_reader can work cross-platform for reading ELF files

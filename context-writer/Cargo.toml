@@ -1,0 +1,11 @@
+[package]
+name = "context-writer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+custom-labels = { path = "../custom-labels" }
+rand = "0.8.5"
+tracing = "0.1.43"
+tracing-subscriber = "0.3.22"
+ctrlc = "3.4"
