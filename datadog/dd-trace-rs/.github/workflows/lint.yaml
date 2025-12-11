@@ -1,0 +1,119 @@
+name: Lint
+permissions:
+  contents: read
+on:
+  push:
+env: 
+  CARGO_TERM_COLOR: always
+
+jobs:
+  actionlint: 
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run actionlint
+        uses: devops-actions/actionlint@e7ee33fbf5aa8c9f9ee1145137f3e52e25d6a35b # v0.1.3
+        with:
+          shellcheck_opts: '-e SC2086'
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Cache
+        uses: ./.github/actions/cache
+      - name: Install nightly-2024-12-16 toolchain and rustfmt
+        run: rustup install nightly-2024-12-16 && rustup default nightly-2024-12-16 && rustup component add rustfmt
+      - run: cargo fmt --all -- --check
+  clippy:
+    name: "clippy #${{ matrix.platform }} ${{ matrix.rust_version }}"
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_version: ["1.84.1", "stable", "nightly-2024-12-16"]
+        platform: [windows-latest, ubuntu-latest]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Cache
+        uses: ./.github/actions/cache
+        with:
+          rust_version: ${{ matrix.rust_version }}
+      - name: Install ${{ matrix.rust_version }} toolchain and clippy
+        run: rustup install ${{ matrix.rust_version }} && rustup default ${{ matrix.rust_version }} && rustup component add clippy
+      - name: Run clippy on ${{ matrix.platform }} ${{ matrix.rust_version }} 
+        shell: bash
+        run: |
+          # shellcheck disable=SC2046
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings $([ ${{ matrix.rust_version }} = 1.84.1 ] || [ ${{ matrix.rust_version }} = stable ] && echo -Aunknown-lints -Ainvalid_reference_casting -Aclippy::redundant-closure-call)
+  licensecheck:
+    runs-on: ubuntu-latest
+    name: "Presence of licence headers"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install licensecheck
+        run: sudo apt-get install -y licensecheck
+      - name: Check licenses
+        # Exclude symbolizer-ffi from the checks (mostly imported code)
+        run: '! find . \( -name "*.rs" -o -name "*.c" -o -name "*.sh" \) -print0 | xargs -0 licensecheck -c ".*" | grep -v "Apache License 2.0"'
+
+  license-3rdparty-csv:
+    runs-on: ubuntu-latest
+    name: "Valid LICENSE-3rdparty.csv"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: stat LICENSE-3rdparty.csv
+      - name: Cache
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/db/
+            ~/.cargo/bin/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          # cache key contains current version of dd-rust-license-tool
+          # when upstream version is updated we can bump the cache key version,
+          # to cache the latest version of the tool
+          key: "v1-dd-rust-license-tool"
+      - name: Cache
+        uses: ./.github/actions/cache
+      - name: Install dd-rust-license-tool
+        run: which dd-rust-license-tool || cargo install --git https://github.com/DataDog/rust-license-tool.git dd-rust-license-tool
+      # To ensure the dependency tree is identical between the CI runner and the
+      # local license generation script (which also forces the 'git' protocol),
+      # we explicitly set the crates.io protocol. Cargo's default can vary
+      # between 'git' and 'sparse' depending on the environment, which can lead
+      # to different dependency resolutions. This guarantees consistency.
+      - run: mkdir -p .cargo && printf "[registries.crates-io]\nprotocol = \"git\"\n" > .cargo/config.toml
+      - name: "Generate new LICENSE-3rdparty.csv and check against the previous"
+        run: |
+          # The LICENSE-3rdparty.csv file must match the output of the tool in the Linux CI environment.
+          # To update the file locally, run the './scripts/generate-licenses.sh' script.
+          echo "Running dd-rust-license-tool dump to generate CSV..."
+          if ! dd-rust-license-tool dump > /tmp/CI.csv 2> /tmp/CI.error; then
+            echo "ERROR: dd-rust-license-tool dump failed! See error output below:"
+            cat /tmp/CI.error
+            exit 1
+          fi
+
+          # Compare the generated CSV with the current one. If they differ, diff will have a non-zero exit code.
+          if ! diff /tmp/CI.csv LICENSE-3rdparty.csv; then
+            echo "Differences detected in LICENSE-3rdparty.csv."
+            echo "Please run './scripts/generate-licenses.sh' to update the file and commit the changes."
+            exit 1
+          fi
+
+          echo "No differences found."
+
+      - name: export the generated license file on failure
+        if: failure()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: LICENSE-3rdparty.csv
+          path: /tmp/CI.csv
+          overwrite: true

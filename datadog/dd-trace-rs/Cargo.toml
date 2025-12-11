@@ -1,0 +1,72 @@
+# Copyright 2025-Present Datadog, Inc. https://www.datadoghq.com/
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+members = [
+    "datadog-opentelemetry",
+    "datadog-opentelemetry/examples/propagator",
+    "datadog-opentelemetry/examples/simple_tracing",
+    "datadog-opentelemetry-mappings",
+    "dd-trace",
+    "dd-trace-propagation",
+    "dd-trace-sampling",
+]
+
+# https://doc.rust-lang.org/cargo/reference/resolver.html#feature-resolver-version-2
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.84.1"
+edition = "2021"
+version = "0.0.1"
+license = "Apache-2.0"
+repository = "https://github.com/DataDog/dd-trace-rs"
+readme = "README.md"
+description = "Reserved future DataDog package, contact info@datadoghq.com if you think this package name shouldn't be used."
+
+[workspace.dependencies]
+# Libdatadog dependencies - change to a stable version once we release
+data-pipeline = { git = "https://github.com/Datadog/libdatadog", rev = "f9ac67036ce7391903706fbb433fc5feec19eb95", default-features = false }
+datadog-trace-utils = { git = "https://github.com/Datadog/libdatadog", rev = "f9ac67036ce7391903706fbb433fc5feec19eb95", default-features = false }
+ddtelemetry = { git = "https://github.com/Datadog/libdatadog", rev = "f9ac67036ce7391903706fbb433fc5feec19eb95", default-features = false }
+ddcommon = { git = "https://github.com/Datadog/libdatadog", rev = "f9ac67036ce7391903706fbb433fc5feec19eb95", default-features = false }
+
+futures = "0.3.31"
+opentelemetry_sdk = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test", features = [
+    "trace",
+    "logs",
+], default-features = false }
+opentelemetry = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test", features = [
+    "trace",
+], default-features = false }
+opentelemetry-semantic-conventions = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test", features = [
+    "semconv_experimental",
+] }
+tokio = { version = "1.44.1" }
+rand = { version = "0.8", features = ["small_rng"] }
+
+serde = { version = "1.0.194" }
+serde_json = { version = "1.0.140" }
+
+hashbrown = { version = "0.15.5" }
+foldhash = { version = "0.1.5" }
+
+
+[profile.dev]
+debug = 2 # full debug info
+
+[profile.bench]
+codegen-units = 1
+debug = false
+incremental = false
+opt-level = 3
+
+[patch.crates-io]
+opentelemetry = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry_sdk = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-semantic-conventions = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-appender-tracing = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-http = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-stdout = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-otlp = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }
+opentelemetry-proto = { git = "https://github.com/bantonsson/opentelemetry-rust", branch = "ban/context-observer-test" }

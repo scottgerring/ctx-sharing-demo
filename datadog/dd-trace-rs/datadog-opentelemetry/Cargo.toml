@@ -1,0 +1,59 @@
+[package]
+name = "datadog-opentelemetry"
+# rust-version.workspace = true
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description.workspace = true
+
+[dependencies]
+# Workspace dependencies
+dd-trace = { path = "../dd-trace" }
+dd-trace-sampling = { path = "../dd-trace-sampling" }
+dd-trace-propagation = { path = "../dd-trace-propagation", features = [
+    "opentelemetry",
+] }
+datadog-opentelemetry-mappings = { path = "../datadog-opentelemetry-mappings" }
+
+# External dependencies
+futures = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry = { workspace = true, features = ["context_observer"] }
+opentelemetry-semantic-conventions = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+foldhash = { workspace = true }
+hashbrown = { workspace = true }
+
+# Used to write our Thread Locals with context info
+# See https://github.com/polarsignals/custom-labels/
+custom-labels = { version = "0.4", optional = true }
+
+# Libdatadog dependencies
+data-pipeline = { workspace = true }
+datadog-trace-utils = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+assert_unordered = "0.3"
+
+# Libdatadog dependencies - change to a stable version once we release
+datadog-trace-utils = { workspace = true, features = ["test-utils"] }
+
+# Depend on ourselves to have APIs exposed only during tests
+datadog-opentelemetry = { path = ".", features = ["test-utils"] }
+
+# Testing the tracing API
+tracing = { version = "0.1.4" }
+tracing-opentelemetry = { version = "0.32" }
+tracing-subscriber = { version = "0.3" }
+
+# Benchmarking
+criterion = "0.5.1"
+
+[features]
+test-utils = ["dd-trace/test-utils", "data-pipeline/test-utils"]
+active-span-metadata = []
+context-observer = ["custom-labels", "active-span-metadata"]
