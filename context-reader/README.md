@@ -1,7 +1,13 @@
 # Context Reader
 
 An out-of-process reader for the [polar signals custom-labels](https://github.com/polarsignals/custom-labels/tree/master)
-thread local storage format.
+_Thread Local Storage Format_, as well as our own TLS v2 proposal, as well as the [OTEP-4719](https://github.com/open-telemetry/opentelemetry-specification/pull/4719/changes)
+_Process Context Format_. 
+
+When you launch the process pointed at a particular PID, it loads the processes maps from `/proc/<pid>/maps`, hunts
+around for process context mappings, as well as custom-labels v1 and v2 TLS variables.
+
+It then loops forever, printing out any v1 and v2 labels on the process threads periodically. 
 
 It needs:
 
@@ -11,16 +17,11 @@ It needs:
 
 You'll have to run it as root, or give it `CAP_SYS_PTRACE`.
 
-**Exciting Caveat**: For the moment, we're finding the TLs _in the static binary_, not at runtime. This means things that are dynamically
-loading code - say, Java - won't work yet. This shouldn't be too dramatic to change once we've got an example that does this to work
-against.
 
-## How, even?
+## How's it work?
 
-* The user passes us a PID to watch, and we make sure its running, then go find the binary behind it.
-* We use [goblin](https://docs.rs/goblin/latest/goblin/) to hunt around in its symbol tables to find `custom_labels_abi_version` and `custom_labels_current_set`; the former confirms we're reading what we expect to read, the latter is the actual, current, TL data.
-
-At this point we're ready to start polling the process every interval (the default is 1s). For each poll:
+At startup, we hunt for configuration for the two label formats, and then having found at least one of them, 
+read them out of the running process. 
 
 * We use [procfs](http://docs.rs/procfs/latest/procfs/) to read the current threads out of the process
 * For each thread:
@@ -31,7 +32,3 @@ At this point we're ready to start polling the process every interval (the defau
       chase the pointers back.
     * Print it to screen!
 
-There is some fairly sinister linux trickery in [src/tls_reader.rs](src/tls_reader.rs) to support this; the rest
-is fairly straightforward. If we wanted to do this _more seriously_, we'd probably want to use polarsignals' library
-directly for the serialization types; I've not done this because I wanted to make sure we could make this work without
-the C bindings it contains.

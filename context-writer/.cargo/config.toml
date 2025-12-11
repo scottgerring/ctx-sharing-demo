@@ -1,0 +1,6 @@
+[target.'cfg(target_os = "linux")']
+rustflags = [
+"-Clink-arg=-Wl,--export-dynamic-symbol=custom_labels_abi_version",
+"-Clink-arg=-Wl,--export-dynamic-symbol=custom_labels_current_set",
+"-Clink-arg=-Wl,--export-dynamic-symbol=custom_labels_current_set_v2",
+]
