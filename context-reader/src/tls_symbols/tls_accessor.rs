@@ -18,22 +18,33 @@ pub enum TlsLocation {
     SharedLibrary { module_id: usize, offset: usize },
 }
 
-/// Get the memory address of a TLS variable in a specific thread
+/// Get the memory address of a TLS variable in a specific thread.
+/// This version reads the thread pointer via ptrace internally.
 pub fn get_tls_variable_address(pid: i32, tid: i32, location: &TlsLocation) -> Result<usize> {
+    let thread_pointer = get_thread_pointer(tid)?;
+    get_tls_variable_address_with_thread_pointer(pid, thread_pointer, location)
+}
+
+/// Get the memory address of a TLS variable using a pre-computed thread pointer.
+/// Use this when you've already read the thread pointer via ptrace to avoid
+/// repeated attach/detach cycles.
+pub fn get_tls_variable_address_with_thread_pointer(
+    pid: i32,
+    thread_pointer: usize,
+    location: &TlsLocation,
+) -> Result<usize> {
     match location {
-        TlsLocation::MainExecutable { offset } => get_tls_via_static_offset(tid, *offset),
+        TlsLocation::MainExecutable { offset } => {
+            get_tls_via_static_offset_with_tp(thread_pointer, *offset)
+        }
         TlsLocation::SharedLibrary { module_id, offset } => {
-            get_tls_via_dtv(pid, tid, *module_id, *offset)
+            get_tls_via_dtv_with_tp(pid, thread_pointer, *module_id, *offset)
         }
     }
 }
 
-/// Get TLS address for main executable using static offset.
-/// This is the "Local Exec" relocation model, where we have a static
-/// offset from the thread pointer register.
-fn get_tls_via_static_offset(tid: i32, tls_offset: usize) -> Result<usize> {
-    let thread_pointer = get_thread_pointer(tid)?;
-
+/// Get TLS address for main executable using static offset (with pre-computed thread pointer).
+fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -> Result<usize> {
     // The TLS layout differs between architectures:
     //
     // x86-64 uses TLS variant II:
@@ -66,11 +77,13 @@ fn get_tls_via_static_offset(tid: i32, tls_offset: usize) -> Result<usize> {
     Ok(tls_addr)
 }
 
-/// Get TLS address for shared library using DTV (Dynamic Thread Vector)
-/// This is the "Global Dynamic (GD)" relocation model.
-fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> Result<usize> {
-    let thread_pointer = get_thread_pointer(tid)?;
-
+/// Get TLS address for shared library using DTV (with pre-computed thread pointer).
+fn get_tls_via_dtv_with_tp(
+    pid: i32,
+    thread_pointer: usize,
+    module_id: usize,
+    tls_offset: usize,
+) -> Result<usize> {
     // Read the DTV pointer from the thread control block
     // The DTV location differs by architecture:
     // - x86-64: DTV pointer is at thread_pointer + 0 (first word of TCB)
@@ -132,10 +145,11 @@ fn get_tls_via_dtv(pid: i32, tid: i32, module_id: usize, tls_offset: usize) -> R
     Ok(tls_addr)
 }
 
-/// Get the thread pointer register value for a thread
+/// Get the thread pointer register value for a thread.
+/// Requires the thread to be ptrace-attached.
 /// - x86-64: FS_BASE register
 /// - aarch64: TPIDR_EL0 register
-fn get_thread_pointer(tid: i32) -> Result<usize> {
+pub fn get_thread_pointer(tid: i32) -> Result<usize> {
     #[cfg(target_arch = "x86_64")]
     {
         get_fs_base(tid)

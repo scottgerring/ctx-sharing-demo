@@ -1,11 +1,9 @@
 //! V1 TLS Reader - reads the original custom-labels format (string-keyed labelset)
 
 use anyhow::{Context, Result};
-use nix::sys::ptrace;
-use nix::unistd::Pid;
 use tracing::info;
 
-use crate::tls_reader_trait::{get_thread_ids, Label, LabelValue, ThreadResult, TlsReader};
+use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
 use crate::tls_symbols::process::LoadedTlsSymbol;
 use crate::tls_symbols::tls_accessor;
@@ -107,41 +105,35 @@ impl TlsReader for V1Reader {
         "v1"
     }
 
-    fn read_all_threads(&self, pid: i32) -> Result<Vec<ThreadResult>> {
-        let tids = get_thread_ids(pid)?;
-        let mut results = Vec::new();
-
-        for tid in tids {
-            match read_thread_labels(pid, tid, &self.library) {
-                Ok(labels) => {
-                    if labels.is_empty() {
-                        results.push(ThreadResult::NotFound { tid });
-                    } else {
-                        results.push(ThreadResult::Found { tid, labels });
+    fn read_thread(&self, pid: i32, ctx: &ThreadContext) -> ThreadResult {
+        match self.read_thread_labels(pid, ctx) {
+            Ok(labels) => {
+                if labels.is_empty() {
+                    ThreadResult::NotFound { tid: ctx.tid }
+                } else {
+                    ThreadResult::Found {
+                        tid: ctx.tid,
+                        labels,
                     }
                 }
-                Err(e) => {
-                    results.push(ThreadResult::Error {
-                        tid,
-                        error: format!("{:#}", e),
-                    });
-                }
             }
+            Err(e) => ThreadResult::Error {
+                tid: ctx.tid,
+                error: format!("{:#}", e),
+            },
         }
-
-        Ok(results)
     }
 }
 
-/// Read labels from a single thread
-fn read_thread_labels(pid: i32, tid: i32, library: &LoadedTlsSymbol) -> Result<Vec<Label>> {
-    let thread_pid = Pid::from_raw(tid);
-
-    ptrace::attach(thread_pid).context("Failed to attach with ptrace")?;
-    nix::sys::wait::waitpid(thread_pid, None).context("Failed to wait for thread")?;
-
-    let result = (|| -> Result<Vec<Label>> {
-        let tls_addr = tls_accessor::get_tls_variable_address(pid, tid, &library.tls_location)?;
+impl V1Reader {
+    /// Read labels from a single thread using pre-computed thread pointer.
+    /// No ptrace attach/detach - that's handled by the caller.
+    fn read_thread_labels(&self, pid: i32, ctx: &ThreadContext) -> Result<Vec<Label>> {
+        let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
+            pid,
+            ctx.thread_pointer,
+            &self.library.tls_location,
+        )?;
 
         let mut ptr_bytes = [0u8; 8];
         read_memory(pid, tls_addr, &mut ptr_bytes)?;
@@ -159,10 +151,7 @@ fn read_thread_labels(pid: i32, tid: i32, library: &LoadedTlsSymbol) -> Result<V
         };
 
         parse_labels(pid, labelset)
-    })();
-
-    let _ = ptrace::detach(thread_pid, None);
-    result
+    }
 }
 
 /// Parse labels from a labelset

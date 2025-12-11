@@ -29,7 +29,7 @@ hashbrown = { workspace = true }
 
 # Used to write our Thread Locals with context info
 # See https://github.com/polarsignals/custom-labels/
-custom-labels = { version = "0.4", optional = true }
+custom-labels = { path = "../../../custom-labels", optional = true }
 
 # Libdatadog dependencies
 data-pipeline = { workspace = true }

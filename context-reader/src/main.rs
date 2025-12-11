@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use custom_labels::{process_context};
 
 // Generic TLS symbol discovery infrastructure
 // Note: elf_reader can work cross-platform for reading ELF files
@@ -65,9 +64,13 @@ fn main() -> Result<()> {
 #[cfg(target_os = "linux")]
 fn run(args: Args) -> Result<()> {
     use anyhow::Context;
+    use custom_labels::process_context;
+    use nix::sys::ptrace;
+    use nix::unistd::Pid;
     use std::time::Duration;
-    use tls_reader_trait::{ThreadResult, TlsReader};
-    use tracing::info;
+    use tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
+    use tls_symbols::tls_accessor;
+    use tracing::{debug, info};
 
     // Validate process exists
     let proc = procfs::process::Process::new(args.pid).context("Failed to find process")?;
@@ -143,24 +146,81 @@ fn run(args: Args) -> Result<()> {
             break;
         }
 
+        // Get all thread IDs once per iteration
+        let tids = match get_thread_ids(args.pid) {
+            Ok(tids) => tids,
+            Err(e) => {
+                info!("Failed to get thread IDs: {}", e);
+                std::thread::sleep(interval);
+                continue;
+            }
+        };
+
+        // Collect thread contexts by attaching once per thread
+        let mut thread_contexts: Vec<ThreadContext> = Vec::with_capacity(tids.len());
+        let mut thread_errors: Vec<(i32, String)> = Vec::new();
+
+        for tid in tids {
+            let thread_pid = Pid::from_raw(tid);
+
+            // Attach to thread
+            if let Err(e) = ptrace::attach(thread_pid) {
+                debug!("Failed to attach to thread {}: {}", tid, e);
+                thread_errors.push((tid, format!("Failed to attach: {}", e)));
+                continue;
+            }
+
+            // Wait for thread to stop
+            if let Err(e) = nix::sys::wait::waitpid(thread_pid, None) {
+                debug!("Failed to wait for thread {}: {}", tid, e);
+                let _ = ptrace::detach(thread_pid, None);
+                thread_errors.push((tid, format!("Failed to wait: {}", e)));
+                continue;
+            }
+
+            // Read thread pointer while attached
+            let thread_pointer = match tls_accessor::get_thread_pointer(tid) {
+                Ok(tp) => tp,
+                Err(e) => {
+                    debug!("Failed to get thread pointer for {}: {}", tid, e);
+                    let _ = ptrace::detach(thread_pid, None);
+                    thread_errors.push((tid, format!("Failed to get thread pointer: {}", e)));
+                    continue;
+                }
+            };
+
+            // Detach immediately after reading thread pointer
+            let _ = ptrace::detach(thread_pid, None);
+
+            thread_contexts.push(ThreadContext { tid, thread_pointer });
+        }
+
         let mut any_labels_found = false;
 
-        // Read from each reader and print results
+        // Now call each reader for each thread (no ptrace needed)
         for reader in &readers {
-            match reader.read_all_threads(args.pid) {
-                Ok(results) => {
-                    let has_labels = results
-                        .iter()
-                        .any(|r| matches!(r, ThreadResult::Found { .. }));
-                    if has_labels {
-                        any_labels_found = true;
-                    }
-                    output::print_iteration(iteration, reader.name(), &results);
+            let mut results: Vec<ThreadResult> = Vec::with_capacity(
+                thread_contexts.len() + thread_errors.len(),
+            );
+
+            // Process successful thread contexts
+            for ctx in &thread_contexts {
+                let result = reader.read_thread(args.pid, ctx);
+                if matches!(result, ThreadResult::Found { .. }) {
+                    any_labels_found = true;
                 }
-                Err(e) => {
-                    info!("[{}] Error reading threads: {}", reader.name(), e);
-                }
+                results.push(result);
             }
+
+            // Add errors for threads we couldn't attach to
+            for (tid, error) in &thread_errors {
+                results.push(ThreadResult::Error {
+                    tid: *tid,
+                    error: error.clone(),
+                });
+            }
+
+            output::print_iteration(iteration, reader.name(), &results);
         }
 
         if !any_labels_found {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use custom_labels::process_context::tls::ProcessContextTlsExt;
+use custom_labels::v2::process_context_ext::ProcessContextTlsExt;
 use custom_labels::process_context::{ProcessContext, ProcessContextWriter};
 use custom_labels::v2::{self, KeyHandle};
 use rand::seq::SliceRandom;
@@ -89,7 +89,7 @@ fn main() {
     };
 
     info!("Initializing custom-labels v2 with max_record_size={}", MAX_RECORD_SIZE);
-    v2::setup(MAX_RECORD_SIZE);
+    v2::writer::setup(MAX_RECORD_SIZE);
 
     // Set up ctrl-c handler
     let running = Arc::new(AtomicBool::new(true));
@@ -156,7 +156,7 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
         );
 
         // Attach the context to TLS
-        v2::set_current_record(Some(&span_id), |builder| {
+        v2::writer::set_current_record(Some(&span_id), |builder| {
             builder.set_trace(&trace_id, &span_id, &root_span_id);
             builder.set_attr_str(method_key, method).unwrap();
             builder.set_attr_str(route_key, route).unwrap();
@@ -174,7 +174,7 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
             work_duration_ms = work_duration,
             "Detaching context"
         );
-        v2::clear_current_record();
+        v2::writer::clear_current_record();
 
         // Brief pause between requests
         let pause_duration = rng.gen_range(MIN_PAUSE_MS / 2..=MAX_PAUSE_MS / 2);

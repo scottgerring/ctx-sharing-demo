@@ -2,10 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Extracted span data with zero-copy access to trace information
-///
-/// This struct provides borrowed access to raw trace and span IDs,
-/// avoiding allocations and cloning in the context switch hot path.
-/// Writers are responsible for formatting IDs as needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractedSpanData<'a> {
     /// Full trace ID as 128-bit integer (16 bytes)

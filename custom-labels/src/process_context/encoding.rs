@@ -1,34 +1,22 @@
 ///
-/// A minimal protobuf implementation of what we need for encoding
-/// process-context and not much more.
+/// A minimal protobuf implementation for encoding/decoding OTEL process-context.
+/// Supports string, int64, and kvlist value types.
 ///
 
-use super::model::{Error, KeyValue, ProcessContext, Result, KEY_VALUE_LIMIT, UINT14_MAX};
+use super::model::{Error, KeyValue, ProcessContext, Result, Value, KEY_VALUE_LIMIT, UINT14_MAX};
 
-/// Wire type for length-delimited fields (strings, nested messages)
+/// Wire type for varint fields (int64, uint64, int32, etc.)
+const WIRE_TYPE_VARINT: u8 = 0;
+/// Wire type for length-delimited fields (strings, bytes, nested messages)
 const WIRE_TYPE_LEN: u8 = 2;
 
-/// Calculate the size of a varint encoding (1 or 2 bytes for values up to UINT14_MAX)
+// =============================================================================
+// Varint encoding/decoding
+// =============================================================================
+
+/// Calculate the size of a varint encoding for u16 (1 or 2 bytes for values up to UINT14_MAX)
 fn varint_size(value: u16) -> usize {
     if value >= 128 { 2 } else { 1 }
-}
-
-/// Calculate the size of a protobuf record (tag + length varint + data)
-fn record_size(data_len: usize) -> usize {
-    1 + varint_size(data_len as u16) + data_len
-}
-
-/// Calculate the size of a protobuf string field
-fn string_size(s: &str) -> usize {
-    record_size(s.len())
-}
-
-/// Calculate the size of an OTEL KeyValue message (without the outer record wrapper)
-fn keyvalue_size(key: &str, value: &str) -> usize {
-    let key_field_size = string_size(key);
-    // Value is nested: AnyValue message containing string_value
-    let value_field_size = record_size(string_size(value));
-    key_field_size + value_field_size
 }
 
 /// Write a varint to the buffer (supports values up to UINT14_MAX)
@@ -36,81 +24,174 @@ fn write_varint(buf: &mut Vec<u8>, value: u16) {
     if value < 128 {
         buf.push(value as u8);
     } else {
-        // Two bytes: first byte has MSB set (continuation), second has remaining bits
         buf.push((value & 0x7F) as u8 | 0x80);
         buf.push((value >> 7) as u8);
     }
 }
 
-/// Write a protobuf tag (field number + wire type)
-fn write_tag(buf: &mut Vec<u8>, field_number: u8) {
+/// Write an i64 as a varint. For positive values this is efficient.
+/// Negative values require 10 bytes (two's complement), but we don't use them.
+fn write_varint_i64(buf: &mut Vec<u8>, value: i64) {
+    debug_assert!(value >= 0, "negative int64 values not supported");
+    let mut v = value as u64;
+    while v >= 0x80 {
+        buf.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    buf.push(v as u8);
+}
+
+// =============================================================================
+// Tag encoding/decoding
+// =============================================================================
+
+/// Write a protobuf tag with wire type VARINT
+fn write_tag_varint(buf: &mut Vec<u8>, field_number: u8) {
+    buf.push((field_number << 3) | WIRE_TYPE_VARINT);
+}
+
+/// Write a protobuf tag with wire type LEN (length-delimited)
+fn write_tag_len(buf: &mut Vec<u8>, field_number: u8) {
     buf.push((field_number << 3) | WIRE_TYPE_LEN);
 }
 
-/// Write a protobuf string field
+// =============================================================================
+// String encoding
+// =============================================================================
+
+/// Calculate the size of a protobuf string field (length varint + bytes)
+fn string_field_size(s: &str) -> usize {
+    varint_size(s.len() as u16) + s.len()
+}
+
+/// Write a protobuf string (length + bytes, without tag)
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     write_varint(buf, s.len() as u16);
     buf.extend_from_slice(s.as_bytes());
 }
 
-/// Write a complete attribute (Resource.attributes field)
-fn write_attribute(buf: &mut Vec<u8>, key: &str, value: &str) {
-    // Resource.attributes (field 1) - KeyValue message
-    write_tag(buf, 1);
-    write_varint(buf, keyvalue_size(key, value) as u16);
+// =============================================================================
+// AnyValue encoding
+// =============================================================================
 
-    // KeyValue.key (field 1)
-    write_tag(buf, 1);
-    write_string(buf, key);
-
-    // KeyValue.value (field 2) - AnyValue message
-    write_tag(buf, 2);
-    write_varint(buf, string_size(value) as u16);
-
-    // AnyValue.string_value (field 1)
-    write_tag(buf, 1);
-    write_string(buf, value);
+/// Encode an AnyValue message to bytes
+fn encode_anyvalue(value: &Value) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match value {
+        Value::String(s) => {
+            // string_value = field 1, wire type LEN
+            write_tag_len(&mut buf, 1);
+            write_string(&mut buf, s);
+        }
+        Value::Int(i) => {
+            // int_value = field 3, wire type VARINT
+            write_tag_varint(&mut buf, 3);
+            write_varint_i64(&mut buf, *i);
+        }
+        Value::KvList(kvs) => {
+            // kvlist_value = field 6, wire type LEN
+            let kvlist_bytes = encode_kvlist(kvs);
+            write_tag_len(&mut buf, 6);
+            write_varint(&mut buf, kvlist_bytes.len() as u16);
+            buf.extend(kvlist_bytes);
+        }
+    }
+    buf
 }
 
-/// Validate a key-value pair
-fn validate_kv(key: &str, value: &str) -> Result<()> {
-    if key.len() > KEY_VALUE_LIMIT {
-        return Err(Error::StringTooLong {
-            field: key.to_string(),
-            len: key.len(),
-        });
+/// Encode a KeyValueList message to bytes
+fn encode_kvlist(kvs: &[KeyValue]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for kv in kvs {
+        // KeyValueList.values = field 1, wire type LEN
+        let kv_bytes = encode_keyvalue(kv);
+        write_tag_len(&mut buf, 1);
+        write_varint(&mut buf, kv_bytes.len() as u16);
+        buf.extend(kv_bytes);
     }
-    if value.len() > KEY_VALUE_LIMIT {
-        return Err(Error::StringTooLong {
-            field: format!("value for '{}'", key),
-            len: value.len(),
-        });
+    buf
+}
+
+/// Encode a KeyValue message to bytes
+fn encode_keyvalue(kv: &KeyValue) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // KeyValue.key = field 1, wire type LEN
+    write_tag_len(&mut buf, 1);
+    write_string(&mut buf, &kv.key);
+
+    // KeyValue.value = field 2, wire type LEN (AnyValue message)
+    let anyvalue_bytes = encode_anyvalue(&kv.value);
+    write_tag_len(&mut buf, 2);
+    write_varint(&mut buf, anyvalue_bytes.len() as u16);
+    buf.extend(anyvalue_bytes);
+
+    buf
+}
+
+// =============================================================================
+// Validation
+// =============================================================================
+
+/// Validate a value recursively
+fn validate_value(key: &str, value: &Value) -> Result<()> {
+    match value {
+        Value::String(s) => {
+            if s.len() > KEY_VALUE_LIMIT {
+                return Err(Error::StringTooLong {
+                    field: format!("value for '{}'", key),
+                    len: s.len(),
+                });
+            }
+        }
+        Value::Int(_) => {}
+        Value::KvList(kvs) => {
+            for kv in kvs {
+                validate_kv(kv)?;
+            }
+        }
     }
     Ok(())
 }
+
+/// Validate a key-value pair
+fn validate_kv(kv: &KeyValue) -> Result<()> {
+    if kv.key.len() > KEY_VALUE_LIMIT {
+        return Err(Error::StringTooLong {
+            field: kv.key.clone(),
+            len: kv.key.len(),
+        });
+    }
+    validate_value(&kv.key, &kv.value)
+}
+
+// =============================================================================
+// Main encode function
+// =============================================================================
 
 /// Encode a ProcessContext to protobuf bytes
 pub fn encode(ctx: &ProcessContext) -> Result<Vec<u8>> {
     // Validate all resources
     for kv in &ctx.resources {
-        validate_kv(&kv.key, &kv.value)?;
+        validate_kv(kv)?;
     }
 
-    // Calculate total size for pre-allocation
-    let total_size: usize = ctx.resources
-        .iter()
-        .map(|kv| record_size(keyvalue_size(&kv.key, &kv.value)))
-        .sum();
+    let mut buf = Vec::new();
 
-    let mut buf = Vec::with_capacity(total_size);
-
-    // Write all attributes
+    // Write all attributes as Resource.attributes (field 1)
     for kv in &ctx.resources {
-        write_attribute(&mut buf, &kv.key, &kv.value);
+        let kv_bytes = encode_keyvalue(kv);
+        write_tag_len(&mut buf, 1);
+        write_varint(&mut buf, kv_bytes.len() as u16);
+        buf.extend(kv_bytes);
     }
 
     Ok(buf)
 }
+
+// =============================================================================
+// Decoding
+// =============================================================================
 
 /// Reader state for decoding
 struct Reader<'a> {
@@ -136,6 +217,7 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
+    /// Read a varint as u16 (for lengths, limited to UINT14_MAX)
     fn read_varint(&mut self) -> Result<u16> {
         let first = self.read_byte()?;
         if first < 128 {
@@ -150,16 +232,28 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn read_tag(&mut self) -> Result<u8> {
-        let tag = self.read_byte()?;
-        let wire_type = tag & 0x07;
-        if wire_type != WIRE_TYPE_LEN {
-            return Err(Error::DecodingFailed(format!(
-                "unexpected wire type: {} (expected {})",
-                wire_type, WIRE_TYPE_LEN
-            )));
+    /// Read a varint as u64 (for int64 values)
+    fn read_varint_u64(&mut self) -> Result<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0;
+        loop {
+            let byte = self.read_byte()?;
+            result |= ((byte & 0x7F) as u64) << shift;
+            if byte < 0x80 {
+                break;
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err(Error::DecodingFailed("varint too long".to_string()));
+            }
         }
-        Ok(tag >> 3)
+        Ok(result)
+    }
+
+    /// Read a tag and return (field_number, wire_type)
+    fn read_tag_full(&mut self) -> Result<(u8, u8)> {
+        let tag = self.read_byte()?;
+        Ok((tag >> 3, tag & 0x07))
     }
 
     fn read_string(&mut self) -> Result<String> {
@@ -177,14 +271,113 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
+    fn skip_bytes(&mut self, len: usize) -> Result<()> {
         if self.pos + len > self.data.len() {
-            return Err(Error::DecodingFailed("bytes extend past end".to_string()));
+            return Err(Error::DecodingFailed("skip extends past end".to_string()));
         }
-        let bytes = &self.data[self.pos..self.pos + len];
         self.pos += len;
-        Ok(bytes)
+        Ok(())
     }
+}
+
+/// Decode an AnyValue message
+fn decode_anyvalue(reader: &mut Reader, len: usize) -> Result<Value> {
+    let end = reader.pos + len;
+
+    if reader.pos >= end {
+        return Err(Error::DecodingFailed("empty AnyValue".to_string()));
+    }
+
+    let (field_number, wire_type) = reader.read_tag_full()?;
+
+    let value = match (field_number, wire_type) {
+        (1, WIRE_TYPE_LEN) => {
+            // string_value
+            Value::String(reader.read_string()?)
+        }
+        (3, WIRE_TYPE_VARINT) => {
+            // int_value
+            Value::Int(reader.read_varint_u64()? as i64)
+        }
+        (6, WIRE_TYPE_LEN) => {
+            // kvlist_value
+            let kvlist_len = reader.read_varint()? as usize;
+            Value::KvList(decode_kvlist(reader, kvlist_len)?)
+        }
+        _ => {
+            return Err(Error::DecodingFailed(format!(
+                "unsupported AnyValue field: {} wire_type: {}",
+                field_number, wire_type
+            )));
+        }
+    };
+
+    // Ensure we consumed exactly the expected length
+    reader.pos = end;
+    Ok(value)
+}
+
+/// Decode a KeyValueList message
+fn decode_kvlist(reader: &mut Reader, len: usize) -> Result<Vec<KeyValue>> {
+    let end = reader.pos + len;
+    let mut result = Vec::new();
+
+    while reader.pos < end {
+        let (field_number, wire_type) = reader.read_tag_full()?;
+        if field_number != 1 || wire_type != WIRE_TYPE_LEN {
+            return Err(Error::DecodingFailed(format!(
+                "expected KeyValueList.values field, got field {} wire_type {}",
+                field_number, wire_type
+            )));
+        }
+        let kv_len = reader.read_varint()? as usize;
+        let kv = decode_keyvalue(reader, kv_len)?;
+        result.push(kv);
+    }
+
+    Ok(result)
+}
+
+/// Decode a KeyValue message
+fn decode_keyvalue(reader: &mut Reader, len: usize) -> Result<KeyValue> {
+    let end = reader.pos + len;
+    let mut key: Option<String> = None;
+    let mut value: Option<Value> = None;
+
+    while reader.pos < end {
+        let (field_number, wire_type) = reader.read_tag_full()?;
+        match (field_number, wire_type) {
+            (1, WIRE_TYPE_LEN) => {
+                // KeyValue.key
+                key = Some(reader.read_string()?);
+            }
+            (2, WIRE_TYPE_LEN) => {
+                // KeyValue.value (AnyValue message)
+                let any_len = reader.read_varint()? as usize;
+                value = Some(decode_anyvalue(reader, any_len)?);
+            }
+            _ => {
+                // Skip unknown fields
+                if wire_type == WIRE_TYPE_LEN {
+                    let skip_len = reader.read_varint()? as usize;
+                    reader.skip_bytes(skip_len)?;
+                } else if wire_type == WIRE_TYPE_VARINT {
+                    reader.read_varint_u64()?;
+                } else {
+                    return Err(Error::DecodingFailed(format!(
+                        "unknown wire type: {}",
+                        wire_type
+                    )));
+                }
+            }
+        }
+    }
+
+    let key = key.ok_or_else(|| Error::DecodingFailed("missing key in KeyValue".to_string()))?;
+    let value =
+        value.ok_or_else(|| Error::DecodingFailed("missing value in KeyValue".to_string()))?;
+
+    Ok(KeyValue { key, value })
 }
 
 /// Decode protobuf bytes to a ProcessContext
@@ -193,94 +386,84 @@ pub fn decode(data: &[u8]) -> Result<ProcessContext> {
     let mut reader = Reader::new(data);
 
     while reader.remaining() > 0 {
-        // Read Resource.attributes field (must be field 1)
-        let field_number = reader.read_tag()?;
-        if field_number != 1 {
+        let (field_number, wire_type) = reader.read_tag_full()?;
+
+        if field_number != 1 || wire_type != WIRE_TYPE_LEN {
             return Err(Error::DecodingFailed(format!(
-                "unexpected field number: {} (expected 1)",
-                field_number
+                "expected Resource.attributes field 1, got field {} wire_type {}",
+                field_number, wire_type
             )));
         }
 
-        // Read KeyValue message length and content
         let kv_len = reader.read_varint()? as usize;
-        let kv_end = reader.pos + kv_len;
-        if kv_end > reader.data.len() {
-            return Err(Error::DecodingFailed("KeyValue extends past end".to_string()));
-        }
-
-        let mut key: Option<String> = None;
-        let mut value: Option<String> = None;
-
-        // Parse KeyValue fields
-        while reader.pos < kv_end {
-            let kv_field = reader.read_tag()?;
-            match kv_field {
-                1 => {
-                    // KeyValue.key
-                    key = Some(reader.read_string()?);
-                }
-                2 => {
-                    // KeyValue.value (AnyValue message)
-                    let any_len = reader.read_varint()? as usize;
-                    let any_end = reader.pos + any_len;
-                    if any_end > reader.data.len() {
-                        return Err(Error::DecodingFailed("AnyValue extends past end".to_string()));
-                    }
-
-                    // Read AnyValue.string_value (field 1)
-                    let any_field = reader.read_tag()?;
-                    if any_field == 1 {
-                        value = Some(reader.read_string()?);
-                    } else {
-                        // Skip unknown fields in AnyValue
-                        let skip_len = reader.read_varint()? as usize;
-                        reader.read_bytes(skip_len)?;
-                    }
-
-                    // Ensure we consumed the full AnyValue
-                    reader.pos = any_end;
-                }
-                _ => {
-                    // Skip unknown fields
-                    let skip_len = reader.read_varint()? as usize;
-                    reader.read_bytes(skip_len)?;
-                }
-            }
-        }
-
-        // Ensure we consumed exactly the KeyValue length
-        reader.pos = kv_end;
-
-        // Process the key-value pair
-        let key = key.ok_or_else(|| Error::DecodingFailed("missing key".to_string()))?;
-        let value = value.ok_or_else(|| Error::DecodingFailed("missing value".to_string()))?;
-
-        ctx.resources.push(KeyValue::new(key, value));
+        let kv = decode_keyvalue(&mut reader, kv_len)?;
+        ctx.resources.push(kv);
     }
 
     Ok(ctx)
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_roundtrip_minimal() {
-        let ctx = ProcessContext::new();
+    fn test_roundtrip_string_values() {
+        let ctx = ProcessContext::new()
+            .with_resource("service.name", "my-service")
+            .with_resource("service.version", "1.2.3")
+            .with_resource("deployment.environment", "production");
+
         let encoded = encode(&ctx).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(ctx, decoded);
     }
 
     #[test]
-    fn test_roundtrip_full() {
+    fn test_roundtrip_int_values() {
         let ctx = ProcessContext::new()
-            .with_resource("service.name", "my-service")
-            .with_resource("service.version", "1.2.3")
-            .with_resource("deployment.environment", "production")
-            .with_resource("custom.key", "custom-value");
+            .with_resource("threadlocal.schema_version", Value::Int(1))
+            .with_resource("threadlocal.max_record_size", Value::Int(512));
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_kvlist() {
+        let kvlist = vec![
+            KeyValue::string("0", "http_route"),
+            KeyValue::string("1", "http_method"),
+            KeyValue::string("2", "user_id"),
+        ];
+        let ctx = ProcessContext::new()
+            .with_resource("threadlocal.attribute_key_map", Value::KvList(kvlist));
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_full_threadlocal_config() {
+        let ctx = ProcessContext::new()
+            .with_resource("service.name", "test-service")
+            .with_resource("threadlocal.schema_type", "tlsdesc")
+            .with_resource("threadlocal.schema_version", Value::Int(1))
+            .with_resource("threadlocal.max_record_size", Value::Int(64))
+            .with_resource(
+                "threadlocal.attribute_key_map",
+                Value::KvList(vec![
+                    KeyValue::string("0", "http_route"),
+                    KeyValue::string("1", "http_method"),
+                    KeyValue::string("2", "user_id"),
+                ]),
+            );
 
         let encoded = encode(&ctx).unwrap();
         let decoded = decode(&encoded).unwrap();
@@ -310,6 +493,25 @@ mod tests {
         // Test larger two-byte varint
         buf.clear();
         write_varint(&mut buf, 300);
-        assert_eq!(buf, vec![0xAC, 0x02]); // 300 = 0x12C = (44 | 0x80), (2)
+        assert_eq!(buf, vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn test_varint_i64_encoding() {
+        let mut buf = Vec::new();
+        write_varint_i64(&mut buf, 1);
+        assert_eq!(buf, vec![0x01]);
+
+        buf.clear();
+        write_varint_i64(&mut buf, 127);
+        assert_eq!(buf, vec![0x7F]);
+
+        buf.clear();
+        write_varint_i64(&mut buf, 128);
+        assert_eq!(buf, vec![0x80, 0x01]);
+
+        buf.clear();
+        write_varint_i64(&mut buf, 512);
+        assert_eq!(buf, vec![0x80, 0x04]);
     }
 }

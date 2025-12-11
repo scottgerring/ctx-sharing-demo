@@ -2,13 +2,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/customlabels.c");
     println!("cargo:rerun-if-changed=src/customlabels.h");
     println!("cargo:rerun-if-changed=src/customlabels_v2.h");
-    println!("cargo:rerun-if-changed=src/customlabels_v2_thread.h");
-    println!("cargo:rerun-if-changed=src/customlabels_v2_thread.c");
+    println!("cargo:rerun-if-changed=src/customlabels_v2.c");
     println!("cargo:rerun-if-changed=./dlist");
 
     cc::Build::new()
         .file("src/customlabels.c")
-        .file("src/customlabels_v2_thread.c")
+        .file("src/customlabels_v2.c")
         .compile("customlabels");
 
     println!("cargo:rustc-link-lib=static=customlabels");

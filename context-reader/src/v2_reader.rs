@@ -4,21 +4,18 @@
 //! with custom attributes using indexed keys from the key table.
 
 use anyhow::{Context, Result};
-use nix::sys::ptrace;
-use nix::unistd::Pid;
+use custom_labels::process_context::{self};
+use custom_labels::v2::process_context_ext::TlsConfig;
+use custom_labels::v2::reader::{ParsedRecord, ParseError};
 use tracing::{debug, info};
-use custom_labels::{process_context};
-use crate::tls_reader_trait::{get_thread_ids, Label, LabelValue, ThreadResult, TlsReader};
+
+use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
 use crate::tls_symbols::process::LoadedTlsSymbol;
 use crate::tls_symbols::tls_accessor;
 
 // V2 symbol name
 const CUSTOM_LABELS_CURRENT_SET_V2: &str = "custom_labels_current_set_v2";
-
-/// V2 TL record header (fixed-size portion)
-/// Layout: trace_id[16] | span_id[8] | root_span_id[8] | valid[1] | attrs_count[1]
-const V2_HEADER_SIZE: usize = 16 + 8 + 8 + 1 + 1; // 34 bytes
 
 /// V2 TLS Reader for the binary TL record format
 pub struct V2Reader {
@@ -33,39 +30,19 @@ impl V2Reader {
     pub fn try_setup(pid: i32) -> Result<Self> {
         use crate::tls_symbols::process::find_known_symbols_in_process;
 
-        // First, read process-context to get key table
+        // Read process-context and parse TLS config
         let process_ctx = process_context::read_process_context_from_pid(pid)
             .context("Failed to read process-context for v2 setup")?;
 
-        // Extract key table and max record size
-        let key_table_hex = process_ctx
-            .resources
-            .iter()
-            .find(|r| r.key == "tls.key_table")
-            .map(|r| r.value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("No tls.key_table in process-context"))?;
-
-        let max_record_size_str = process_ctx
-            .resources
-            .iter()
-            .find(|r| r.key == "tls.max_record_size")
-            .map(|r| r.value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("No tls.max_record_size in process-context"))?;
-
-        let key_table_bytes = process_context::tls::hex_decode(key_table_hex)
-            .ok_or_else(|| anyhow::anyhow!("Invalid hex in tls.key_table"))?;
-
-        let key_table = process_context::tls::parse_key_table(&key_table_bytes);
-        let max_record_size: u64 = max_record_size_str
-            .parse()
-            .context("Invalid tls.max_record_size")?;
+        let tls_config = TlsConfig::from_process_context(&process_ctx)
+            .ok_or_else(|| anyhow::anyhow!("No TLS config in process-context"))?;
 
         info!(
-            num_keys = key_table.len(),
-            max_record_size = max_record_size,
+            num_keys = tls_config.key_table.len(),
+            max_record_size = tls_config.max_record_size,
             "V2 reader: parsed key table from process-context"
         );
-        for (idx, name) in key_table.iter().enumerate() {
+        for (idx, name) in tls_config.key_table.iter().enumerate() {
             debug!(key_index = idx, key_name = %name, "V2 key");
         }
 
@@ -86,8 +63,8 @@ impl V2Reader {
 
         Ok(Self {
             library,
-            key_table,
-            max_record_size,
+            key_table: tls_config.key_table,
+            max_record_size: tls_config.max_record_size,
         })
     }
 }
@@ -97,135 +74,109 @@ impl TlsReader for V2Reader {
         "v2"
     }
 
-    fn read_all_threads(&self, pid: i32) -> Result<Vec<ThreadResult>> {
-        let tids = get_thread_ids(pid)?;
-        let mut results = Vec::new();
-
-        for tid in tids {
-            match self.read_thread_record(pid, tid) {
-                Ok(Some(labels)) => {
-                    results.push(ThreadResult::Found { tid, labels });
-                }
-                Ok(None) => {
-                    results.push(ThreadResult::NotFound { tid });
-                }
-                Err(e) => {
-                    results.push(ThreadResult::Error {
-                        tid,
-                        error: format!("{:#}", e),
-                    });
-                }
-            }
+    fn read_thread(&self, pid: i32, ctx: &ThreadContext) -> ThreadResult {
+        match self.read_thread_record(pid, ctx) {
+            Ok(Some(labels)) => ThreadResult::Found {
+                tid: ctx.tid,
+                labels,
+            },
+            Ok(None) => ThreadResult::NotFound { tid: ctx.tid },
+            Err(e) => ThreadResult::Error {
+                tid: ctx.tid,
+                error: format!("{:#}", e),
+            },
         }
-
-        Ok(results)
     }
 }
 
 impl V2Reader {
-    /// Read v2 TL record from a single thread
-    fn read_thread_record(&self, pid: i32, tid: i32) -> Result<Option<Vec<Label>>> {
-        let thread_pid = Pid::from_raw(tid);
+    /// Read v2 TL record from a single thread using pre-computed thread pointer.
+    /// No ptrace attach/detach - that's handled by the caller.
+    fn read_thread_record(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<Label>>> {
+        let start = std::time::Instant::now();
+        let record_buf = self.read_record_memory(pid, ctx)?;
+        let elapsed_ns = start.elapsed().as_nanos();
 
-        ptrace::attach(thread_pid).context("Failed to attach with ptrace")?;
-        nix::sys::wait::waitpid(thread_pid, None).context("Failed to wait for thread")?;
+        let Some(record_buf) = record_buf else {
+            debug!(tid = ctx.tid, elapsed_ns = elapsed_ns, "[v2] Memory read complete (null pointer)");
+            return Ok(None);
+        };
 
-        let result = (|| -> Result<Option<Vec<Label>>> {
-            let tls_addr =
-                tls_accessor::get_tls_variable_address(pid, tid, &self.library.tls_location)?;
+        debug!(tid = ctx.tid, elapsed_ns = elapsed_ns, "[v2] Memory read complete");
 
-            // Read the pointer to the v2 record
-            let mut ptr_bytes = [0u8; 8];
-            read_memory(pid, tls_addr, &mut ptr_bytes)?;
-            let record_ptr = usize::from_ne_bytes(ptr_bytes);
-
-            if record_ptr == 0 {
-                return Ok(None);
-            }
-
-            // Read the full record (up to max_record_size)
-            let mut record_buf = vec![0u8; self.max_record_size as usize];
-            read_memory(pid, record_ptr, &mut record_buf)?;
-
-            // Parse the record
-            self.parse_record(&record_buf)
-        })();
-
-        let _ = ptrace::detach(thread_pid, None);
-        result
+        // Parse the record
+        self.parse_record(&record_buf)
     }
 
-    /// Parse a v2 TL record from raw bytes
-    fn parse_record(&self, data: &[u8]) -> Result<Option<Vec<Label>>> {
-        if data.len() < V2_HEADER_SIZE {
-            anyhow::bail!("Record too small: {} bytes", data.len());
-        }
+    /// Read the raw record bytes from process memory.
+    /// Returns None if the record pointer is null.
+    fn read_record_memory(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<u8>>> {
+        let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
+            pid,
+            ctx.thread_pointer,
+            &self.library.tls_location,
+        )?;
 
-        // Parse header fields
-        let trace_id = &data[0..16];
-        let span_id = &data[16..24];
-        let root_span_id = &data[24..32];
-        let valid = data[32];
-        let attrs_count = data[33];
+        // Read the pointer to the v2 record
+        let mut ptr_bytes = [0u8; 8];
+        read_memory(pid, tls_addr, &mut ptr_bytes)?;
+        let record_ptr = usize::from_ne_bytes(ptr_bytes);
 
-        // If not valid, treat as not found
-        if valid == 0 {
+        if record_ptr == 0 {
             return Ok(None);
         }
+
+        // Read the full record (up to max_record_size)
+        let mut record_buf = vec![0u8; self.max_record_size as usize];
+        read_memory(pid, record_ptr, &mut record_buf)?;
+
+        Ok(Some(record_buf))
+    }
+
+    /// Parse a v2 TL record from raw bytes and convert to Labels
+    fn parse_record(&self, data: &[u8]) -> Result<Option<Vec<Label>>> {
+        let record = match ParsedRecord::parse(data) {
+            Ok(r) => r,
+            Err(ParseError::NotValid) => return Ok(None),
+            Err(ParseError::BufferTooSmall { expected, actual }) => {
+                anyhow::bail!("Record too small: {} bytes (need {})", actual, expected);
+            }
+            Err(ParseError::TruncatedAttribute { attr_index }) => {
+                anyhow::bail!("Truncated attribute at index {}", attr_index);
+            }
+        };
 
         let mut labels = Vec::new();
 
         // Add first-class fields
         labels.push(Label {
             key: "trace_id".to_string(),
-            value: LabelValue::Bytes(trace_id.to_vec()),
+            value: LabelValue::Bytes(record.trace_id.to_vec()),
         });
         labels.push(Label {
             key: "span_id".to_string(),
-            value: LabelValue::Bytes(span_id.to_vec()),
+            value: LabelValue::Bytes(record.span_id.to_vec()),
         });
         labels.push(Label {
             key: "local_root_span_id".to_string(),
-            value: LabelValue::Bytes(root_span_id.to_vec()),
+            value: LabelValue::Bytes(record.root_span_id.to_vec()),
         });
 
-        // Parse attributes: [key_index:1][length:1][value:length]
-        let attrs_data = &data[V2_HEADER_SIZE..];
-        let mut offset = 0;
-
-        for _ in 0..attrs_count {
-            if offset + 2 > attrs_data.len() {
-                break;
-            }
-
-            let key_index = attrs_data[offset] as usize;
-            let value_len = attrs_data[offset + 1] as usize;
-            offset += 2;
-
-            if offset + value_len > attrs_data.len() {
-                break;
-            }
-
-            let value_bytes = &attrs_data[offset..offset + value_len];
-            offset += value_len;
-
-            // Look up key name
+        // Convert attributes to labels
+        for attr in record.attributes {
             let key_name = self
                 .key_table
-                .get(key_index)
+                .get(attr.key_index as usize)
                 .cloned()
-                .unwrap_or_else(|| format!("key_{}", key_index));
+                .unwrap_or_else(|| format!("key_{}", attr.key_index));
 
             // Try to interpret as UTF-8 text
-            let value = match std::str::from_utf8(value_bytes) {
+            let value = match std::str::from_utf8(&attr.value) {
                 Ok(s) => LabelValue::Text(s.to_string()),
-                Err(_) => LabelValue::Bytes(value_bytes.to_vec()),
+                Err(_) => LabelValue::Bytes(attr.value),
             };
 
-            labels.push(Label {
-                key: key_name,
-                value,
-            });
+            labels.push(Label { key: key_name, value });
         }
 
         Ok(Some(labels))

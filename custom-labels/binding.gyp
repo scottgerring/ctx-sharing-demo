@@ -26,7 +26,7 @@
                 "js/addon.c",
                 "js/addon_node.c",
                 "src/customlabels.c",
-                "src/customlabels_v2_thread.c"
+                "src/customlabels_v2.c"
             ],
         }
     ]

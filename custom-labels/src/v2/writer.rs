@@ -1,7 +1,8 @@
 use std::ptr::NonNull;
 
-use super::{sys, Error, KeyHandle, Result};
+use super::{sys, Error, KeyHandle};
 use tracing::info;
+use crate::v2::error::{Error, Result};
 
 /// Initialize custom labels with the maximum record size.
 /// Must be called once before using any other v2 functions.

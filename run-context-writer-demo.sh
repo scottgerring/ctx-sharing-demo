@@ -15,19 +15,15 @@ cargo build
 
 # Now start context-writer in the background
 echo "Starting context-writer..."
-cd "../context-writer"
-cargo run 2>&1 > /dev/null &
+../context-writer/target/debug/context-writer 2>&1 > /dev/null &
 WRITER_PID=$!
 
-echo "context-writer started with PID: WRITER_PID"
+echo "context-writer started with PID: $WRITER_PID"
 
 # Give context-writer a moment to fully start up
 echo "Waiting for context-writer to initialize..."
 sleep 2
 
-# Start context-reader to monitor async-web
+# Start context-reader to monitor context-writer
 echo "Starting context-reader to monitor PID $WRITER_PID..."
-cd "../context-reader"
-cargo run -- "$WRITER_PID" --interval 1000
-
-cd ..
+./target/debug/context-reader "$WRITER_PID" --interval 1000

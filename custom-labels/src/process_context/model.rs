@@ -1,6 +1,7 @@
 use std::fmt;
+use thiserror::Error;
 
-/// Maximum size for keys and values (matching C implementation)
+/// Maximum size for keys and values
 pub const KEY_VALUE_LIMIT: usize = 4096;
 
 /// Maximum varint value (14 bits)
@@ -12,18 +13,121 @@ pub const PROCESS_CTX_VERSION: u32 = 2;
 /// Signature bytes for identifying process context mappings
 pub const SIGNATURE: &[u8; 8] = b"OTEL_CTX";
 
+/// Value types for resource attributes (subset of OTEL AnyValue)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    /// String value (AnyValue.string_value)
+    String(String),
+    /// Integer value (AnyValue.int_value)
+    Int(i64),
+    /// Key-value list (AnyValue.kvlist_value)
+    KvList(Vec<KeyValue>),
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::String(s)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(i: i64) -> Self {
+        Value::Int(i)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(i: i32) -> Self {
+        Value::Int(i as i64)
+    }
+}
+
+impl From<u64> for Value {
+    fn from(i: u64) -> Self {
+        Value::Int(i as i64)
+    }
+}
+
+impl From<Vec<KeyValue>> for Value {
+    fn from(kvs: Vec<KeyValue>) -> Self {
+        Value::KvList(kvs)
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Value {
+    /// Returns the string value if this is a `Value::String`, otherwise `None`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns the int value if this is a `Value::Int`, otherwise `None`.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Returns the kvlist value if this is a `Value::KvList`, otherwise `None`.
+    pub fn as_kvlist(&self) -> Option<&[KeyValue]> {
+        match self {
+            Value::KvList(kvs) => Some(kvs.as_slice()),
+            _ => None,
+        }
+    }
+}
+
 /// A key-value pair for resource attributes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyValue {
     pub key: String,
-    pub value: String,
+    pub value: Value,
 }
 
 impl KeyValue {
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<String>, value: impl Into<Value>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
+        }
+    }
+
+    /// Create a string key-value pair
+    pub fn string(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: Value::String(value.into()),
+        }
+    }
+
+    /// Create an integer key-value pair
+    pub fn int(key: impl Into<String>, value: i64) -> Self {
+        Self {
+            key: key.into(),
+            value: Value::Int(value),
+        }
+    }
+
+    /// Create a kvlist key-value pair
+    pub fn kvlist(key: impl Into<String>, values: Vec<KeyValue>) -> Self {
+        Self {
+            key: key.into(),
+            value: Value::KvList(values),
         }
     }
 }
@@ -43,60 +147,35 @@ impl ProcessContext {
     }
 
     /// Add a resource attribute (key-value pair).
-    pub fn with_resource(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_resource(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.resources.push(KeyValue::new(key, value));
         self
     }
 }
 
 /// Errors that can occur during process context operations
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    /// Failed to create or manage memory mapping
+    #[error("mapping failed: {0}")]
     MappingFailed(String),
-    /// Failed to encode process context data
+
+    #[error("encoding failed: {0}")]
     EncodingFailed(String),
-    /// Failed to decode process context data
+
+    #[error("decoding failed: {0}")]
     DecodingFailed(String),
-    /// No process context was found
+
+    #[error("no process context found")]
     NotFound,
-    /// An I/O error occurred
-    IoError(std::io::Error),
-    /// A string exceeded the maximum allowed length
+
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("string too long: {field} has length {len} (max {KEY_VALUE_LIMIT})")]
     StringTooLong { field: String, len: usize },
-    /// Platform not supported
+
+    #[error("platform not supported (Linux only)")]
     PlatformNotSupported,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::MappingFailed(msg) => write!(f, "mapping failed: {}", msg),
-            Error::EncodingFailed(msg) => write!(f, "encoding failed: {}", msg),
-            Error::DecodingFailed(msg) => write!(f, "decoding failed: {}", msg),
-            Error::NotFound => write!(f, "no process context found"),
-            Error::IoError(e) => write!(f, "I/O error: {}", e),
-            Error::StringTooLong { field, len } => {
-                write!(f, "string too long: {} has length {} (max {})", field, len, KEY_VALUE_LIMIT)
-            }
-            Error::PlatformNotSupported => write!(f, "platform not supported (Linux only)"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::IoError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::IoError(e)
-    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

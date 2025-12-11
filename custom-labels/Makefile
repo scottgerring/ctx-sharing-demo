@@ -1,6 +1,6 @@
 CC = gcc
 TARGET = libcustomlabels.so
-SRCS = src/customlabels.c src/customlabels_v2_process.c src/customlabels_v2_thread.c
+SRCS = src/customlabels.c src/customlabels_v2_process.c src/customlabels_v2.c
 
 ARCH := $(shell uname -m)
 

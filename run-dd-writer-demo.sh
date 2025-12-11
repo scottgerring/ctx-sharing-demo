@@ -15,8 +15,7 @@ cargo build
 
 # Now start async-web in the background
 echo "Starting async-web..."
-cd "../datadog/async-web"
-cargo run 2>&1 > /dev/null &
+../datadog/async-web/target/debug/async-web 2>&1 > /dev/null &
 WRITER_PID=$!
 
 echo "async-web started with PID: $WRITER_PID"
@@ -27,7 +26,4 @@ sleep 2
 
 # Start context-reader to monitor async-web
 echo "Starting context-reader to monitor PID $WRITER_PID..."
-cd "../../context-reader"
-cargo run -- "$WRITER_PID" --interval 1000
-
-cd ..
+./target/debug/context-reader "$WRITER_PID" --interval 1000
