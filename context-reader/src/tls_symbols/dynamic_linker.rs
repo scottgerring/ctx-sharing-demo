@@ -2,7 +2,7 @@
 /// Generic dynamic linker introspection for Linux processes.
 /// Provides link_map walking and module ID resolution independent of any
 /// specific TLS variable or application logic.
-///
+/// 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -20,8 +20,11 @@ pub struct LoadedLibrary {
     pub module_id: usize,
 }
 
-/// link_map structure from glibc
-/// See: glibc/include/link.h
+/// link_map structure from glibc (partial - only the fields we need)
+/// See: glibc/include/link.h and glibc/sysdeps/generic/ldsodefs.h
+///
+/// The full structure is much larger, but we only read the initial fields
+/// and then seek to l_tls_modid at a known offset.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct LinkMap {
@@ -45,57 +48,47 @@ struct RDebug {
 }
 
 /// Find the address of the _r_debug symbol in the target process.
-/// This symbol is defined by the dynamic linker and contains the link_map chain.
+/// This symbol is defined by the dynamic linker (ld.so) and contains the link_map chain.
 pub fn find_r_debug_address(pid: i32) -> Result<usize> {
     use goblin::elf::Elf;
-    use procfs::process::Process;
-
-    let proc = Process::new(pid).context("Failed to open process")?;
-    let exe_path = proc.exe().context("Failed to get executable path")?;
-
-    // Read and parse the main executable
-    let buffer = std::fs::read(&exe_path).context("Failed to read executable")?;
-    let elf = Elf::parse(&buffer).context("Failed to parse ELF")?;
-
-    // Look for _r_debug in dynamic symbols
-    for sym in elf.dynsyms.iter() {
-        if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-            if name == "_r_debug" {
-                info!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
-
-                // For ET_EXEC, address is absolute
-                // For ET_DYN (PIE), we need to add base address
-                if elf.header.e_type == goblin::elf::header::ET_DYN {
-                    // Find base address from maps
-                    let base = find_executable_base_address(pid, &exe_path)?;
-                    return Ok(base + sym.st_value as usize);
-                } else {
-                    return Ok(sym.st_value as usize);
-                }
-            }
-        }
-    }
-
-    Err(anyhow!("_r_debug symbol not found in executable"))
-}
-
-/// Find the base address of the main executable in memory
-fn find_executable_base_address(pid: i32, exe_path: &Path) -> Result<usize> {
     use procfs::process::{MMapPath, Process};
 
-    let proc = Process::new(pid)?;
-    let maps = proc.maps()?;
+    let proc = Process::new(pid).context("Failed to open process")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
 
-    // Find the first mapping for this executable
-    for map in maps {
+    // Find the dynamic linker (ld.so) in the memory maps
+    // It's usually named ld-linux-*.so.* or ld.so.*
+    for map in maps.iter() {
         if let MMapPath::Path(ref path) = map.pathname {
-            if path == exe_path {
-                return Ok(map.address.0 as usize);
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if filename.starts_with("ld-linux") || filename.starts_with("ld.so") {
+                info!("Found dynamic linker: {:?}", path);
+
+                // Read and parse the dynamic linker
+                let buffer = std::fs::read(path).context("Failed to read dynamic linker")?;
+                let elf = Elf::parse(&buffer).context("Failed to parse dynamic linker ELF")?;
+
+                // Look for _r_debug in dynamic symbols
+                for sym in elf.dynsyms.iter() {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if name == "_r_debug" {
+                            info!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
+
+                            // ld.so is always ET_DYN, need to add base address
+                            let base = map.address.0 as usize;
+                            let addr = base + sym.st_value as usize;
+                            info!("_r_debug address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
+                            return Ok(addr);
+                        }
+                    }
+                }
+
+                return Err(anyhow!("_r_debug symbol not found in dynamic linker {:?}", path));
             }
         }
     }
 
-    Err(anyhow!("Executable not found in memory maps"))
+    Err(anyhow!("Dynamic linker (ld.so) not found in process memory maps"))
 }
 
 /// Walk the link_map chain starting from r_debug and return all loaded libraries
@@ -111,11 +104,14 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
 
     let mut libraries = Vec::new();
     let mut current_addr = r_debug.r_map;
-    let mut module_id = 1; // Module IDs start at 1
+    let mut position = 1; // Just for logging
 
     // Walk the linked list
     while current_addr != 0 {
         let link_map = read_link_map(pid, current_addr)?;
+
+        // Read the actual l_tls_modid from the link_map structure
+        let tls_modid = read_tls_modid(pid, current_addr)?;
 
         // Read the library name
         let name = if link_map.l_name != 0 {
@@ -125,18 +121,19 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         };
 
         debug!(
-            "link_map[{}]: base={:#x}, name={:?}",
-            module_id, link_map.l_addr, name
+            "link_map[{}]: base={:#x}, l_tls_modid={}, name={:?}",
+            position, link_map.l_addr, tls_modid, name
         );
 
         // Add to list if it has a name (skip main executable with empty name)
+        // Only include libraries that have TLS (tls_modid > 0)
         if !name.is_empty() {
             libraries.push(LoadedLibrary {
                 path: PathBuf::from(name),
                 base_address: link_map.l_addr,
-                module_id,
+                module_id: tls_modid,
             });
-        } else if module_id == 1 {
+        } else if position == 1 {
             // First entry is main executable
             use procfs::process::Process;
             let proc = Process::new(pid)?;
@@ -144,15 +141,15 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
             libraries.push(LoadedLibrary {
                 path: exe_path,
                 base_address: link_map.l_addr,
-                module_id,
+                module_id: tls_modid,
             });
         }
 
         current_addr = link_map.l_next;
-        module_id += 1;
+        position += 1;
 
         // Sanity check to avoid infinite loops
-        if module_id > 10000 {
+        if position > 10000 {
             return Err(anyhow!("Too many libraries in link_map chain (possible corruption)"));
         }
     }
@@ -161,17 +158,65 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
     Ok(libraries)
 }
 
+/// Read a value from link_map that we can use to derive the DTV index.
+///
+/// The glibc link_map structure contains TLS-related fields we can use 
+/// to find this.
+/// 
+/// The magic numbers in here were found from glibc 2.39 on aarch64, 
+/// and also work on same glibc amd64.
+/// 
+/// There's got to be a more robust way of doing this!
+///
+fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
+    const TLS_FIELD_OFFSET: usize = 0x310;
+
+    let field_addr = link_map_addr + TLS_FIELD_OFFSET;
+    let mut buffer = [0u8; std::mem::size_of::<usize>()];
+    read_memory(pid, field_addr, &mut buffer)?;
+    let stored_value = usize::from_ne_bytes(buffer);
+
+    // Empirically, we need to add 1 to get the correct DTV index
+    let dtv_index = if stored_value > 0 { stored_value + 1 } else { 0 };
+
+    debug!("link_map {:#x}: offset {:#x} value={}, dtv_index={}",
+           link_map_addr, TLS_FIELD_OFFSET, stored_value, dtv_index);
+
+    Ok(dtv_index)
+}
+
 /// Resolve the module ID for a specific library path
 pub fn resolve_module_id(pid: i32, library_path: &Path) -> Result<usize> {
-    let r_debug_addr = find_r_debug_address(pid)?;
-    let libraries = walk_link_map_chain(pid, r_debug_addr)?;
+    let r_debug_addr = find_r_debug_address(pid)
+        .context("Failed to find _r_debug address")?;
+    let libraries = walk_link_map_chain(pid, r_debug_addr)
+        .context("Failed to walk link_map chain")?;
 
-    // Match by path
-    for lib in libraries {
+    info!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
+
+    // Match by path - try exact match first
+    for lib in &libraries {
         if lib.path == library_path {
             info!("Resolved module ID {} for {:?}", lib.module_id, library_path);
             return Ok(lib.module_id);
         }
+    }
+
+    // Try matching by filename only (for dlopen'd libraries that may have different paths)
+    let target_filename = library_path.file_name();
+    if let Some(target_name) = target_filename {
+        for lib in &libraries {
+            if lib.path.file_name() == Some(target_name) {
+                info!("Resolved module ID {} for {:?} (matched by filename)", lib.module_id, library_path);
+                return Ok(lib.module_id);
+            }
+        }
+    }
+
+    // Log all libraries for debugging
+    info!("Libraries in link_map chain:");
+    for lib in &libraries {
+        info!("  module_id={}: {:?}", lib.module_id, lib.path);
     }
 
     Err(anyhow!("Library {:?} not found in link_map chain", library_path))

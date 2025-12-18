@@ -72,13 +72,12 @@ pub fn find_symbols_in_binary(path: &Path) -> Result<SymbolInfo> {
         }
     }
 
-    // Determine if this is the main executable or a shared library
-    // Note: Modern executables use Position Independent Executable (PIE) format,
-    // which appears as ET_DYN - the same as a shared library.
-    // We treat these both as executables, and the caller can work it out by looking
-    // at /proc/pid/exe.
-    let is_main_executable = elf.header.e_type == goblin::elf::header::ET_EXEC
-        || elf.header.e_type == goblin::elf::header::ET_DYN;
+    // Determine if this is definitely the main executable
+    // ET_EXEC = traditional non-PIE executable (definitely main executable)
+    // ET_DYN = could be either a PIE executable OR a shared library
+    // For ET_DYN, we default to false (shared library) and let the caller
+    // determine if this is actually the main executable by checking /proc/pid/exe
+    let is_main_executable = elf.header.e_type == goblin::elf::header::ET_EXEC;
 
     Ok(SymbolInfo {
         symbols,

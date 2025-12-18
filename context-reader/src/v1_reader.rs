@@ -129,17 +129,39 @@ impl V1Reader {
     /// Read labels from a single thread using pre-computed thread pointer.
     /// No ptrace attach/detach - that's handled by the caller.
     fn read_thread_labels(&self, pid: i32, ctx: &ThreadContext) -> Result<Vec<Label>> {
+        use tracing::debug;
+
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
             ctx.thread_pointer,
             &self.library.tls_location,
         )?;
 
+        debug!("V1 TLS addr for tid {}: {:#x}", ctx.tid, tls_addr);
+
         let mut ptr_bytes = [0u8; 8];
         read_memory(pid, tls_addr, &mut ptr_bytes)?;
         let labelset_ptr = usize::from_ne_bytes(ptr_bytes);
 
+        debug!("V1 labelset_ptr for tid {}: {:#x}", ctx.tid, labelset_ptr);
+
         if labelset_ptr == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Sanity check: pointer should look like a valid userspace address
+        // On aarch64 Linux, user addresses are typically in the range 0x0000_0000_0000 to 0x0000_ffff_ffff_ffff
+        // or with ASLR in ranges like 0xffff_xxxx_xxxx for stack/mmap regions
+        // Reject obviously invalid pointers to avoid crashes
+        #[cfg(target_arch = "aarch64")]
+        if labelset_ptr < 0x1000 || (labelset_ptr > 0x0000_ffff_ffff_ffff && labelset_ptr < 0xffff_0000_0000_0000) {
+            debug!("V1 labelset_ptr {:#x} looks invalid for tid {}, skipping", labelset_ptr, ctx.tid);
+            return Ok(Vec::new());
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if labelset_ptr < 0x1000 || labelset_ptr > 0x7fff_ffff_ffff {
+            debug!("V1 labelset_ptr {:#x} looks invalid for tid {}, skipping", labelset_ptr, ctx.tid);
             return Ok(Vec::new());
         }
 
@@ -157,8 +179,28 @@ impl V1Reader {
 /// Parse labels from a labelset
 fn parse_labels(pid: i32, labelset: CustomLabelsLabelSet) -> Result<Vec<Label>> {
     use std::collections::HashMap;
+    use tracing::debug;
 
     if labelset.storage == 0 || labelset.count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Sanity check: count should be reasonable (max ~1000 labels)
+    if labelset.count > 1000 {
+        debug!("Labelset count {} is unreasonably large, skipping", labelset.count);
+        return Ok(Vec::new());
+    }
+
+    // Sanity check: storage pointer should look valid
+    #[cfg(target_arch = "aarch64")]
+    if labelset.storage < 0x1000 || (labelset.storage > 0x0000_ffff_ffff_ffff && labelset.storage < 0xffff_0000_0000_0000) {
+        debug!("Labelset storage {:#x} looks invalid, skipping", labelset.storage);
+        return Ok(Vec::new());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    if labelset.storage < 0x1000 || labelset.storage > 0x7fff_ffff_ffff {
+        debug!("Labelset storage {:#x} looks invalid, skipping", labelset.storage);
         return Ok(Vec::new());
     }
 

@@ -1,0 +1,16 @@
+{
+	"name": "Rust (Ubuntu 24.04, arm64)",
+	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+	"features": {
+		"ghcr.io/devcontainers/features/rust:1": {}
+	},
+
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libclang-dev llvm-dev librust-openssl-dev openjdk-21-jdk",
+
+	"customizations": {
+		"jetbrains": {
+			"backend": "RustRover"
+		}
+	}
+}

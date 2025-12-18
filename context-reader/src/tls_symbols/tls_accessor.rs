@@ -85,15 +85,18 @@ fn get_tls_via_dtv_with_tp(
     tls_offset: usize,
 ) -> Result<usize> {
     // Read the DTV pointer from the thread control block
-    // The DTV location differs by architecture:
+    // The DTV is the first member of tcbhead_t on both architectures:
     // - x86-64: DTV pointer is at thread_pointer + 0 (first word of TCB)
-    // - aarch64: DTV pointer is at thread_pointer - 8 (before TCB)
+    // - aarch64: DTV pointer is at thread_pointer + 0 (first word of TCB)
+    //
+    // glibc aarch64 tcbhead_t (sysdeps/aarch64/nptl/tls.h):
+    //   typedef struct { dtv_t *dtv; void *private; } tcbhead_t;
 
     #[cfg(target_arch = "x86_64")]
     let dtv_ptr_addr = thread_pointer;
 
     #[cfg(target_arch = "aarch64")]
-    let dtv_ptr_addr = thread_pointer.wrapping_sub(8);
+    let dtv_ptr_addr = thread_pointer;
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let dtv_ptr_addr = {
@@ -112,13 +115,15 @@ fn get_tls_via_dtv_with_tp(
         anyhow::bail!("DTV pointer is null");
     }
 
-    // DTV layout:
-    // dtv[0] = _ generation counter
+    // DTV layout in glibc:
+    // dtv[0] = generation counter
     // dtv[1] = first module's TLS block
     // dtv[module_id] = this module's TLS block
     //
-    // Each entry is a pointer
-    let dtv_entry_addr = dtv_ptr + (module_id * POINTER_SIZE);
+    // IMPORTANT: Each dtv_t entry is 16 bytes on 64-bit systems, not 8!
+    // The structure is: struct { void *val; bool is_static; } with padding
+    const DTV_ENTRY_SIZE: usize = 16;  // sizeof(dtv_t) on 64-bit
+    let dtv_entry_addr = dtv_ptr + (module_id * DTV_ENTRY_SIZE);
 
     debug!(
         "Reading DTV entry at {:#x} for module {}",
@@ -130,17 +135,28 @@ fn get_tls_via_dtv_with_tp(
     read_memory(pid, dtv_entry_addr, &mut tls_block_ptr_bytes)?;
     let tls_block = usize::from_ne_bytes(tls_block_ptr_bytes);
 
-    if tls_block == 0 {
+    debug!("TLS block for module {}: {:#x}", module_id, tls_block);
+
+    // Check for special "not allocated" marker value (-1)
+    // glibc uses TLS_DTV_UNALLOCATED which is ((void *) -1)
+    if tls_block == usize::MAX {
         anyhow::bail!(
-            "TLS block pointer is null for module {}. This may be an Initial Exec (IE) relocation that we don't support yet!",
+            "TLS block not allocated for module {} (thread hasn't accessed this TLS yet)",
             module_id
         );
     }
 
-    debug!("TLS block for module {}: {:#x}", module_id, tls_block);
+    if tls_block == 0 {
+        anyhow::bail!(
+            "TLS block pointer is null for module {}",
+            module_id
+        );
+    }
 
     // Final address is TLS block base + symbol offset
     let tls_addr = tls_block + tls_offset;
+    debug!("TLS address for module {}: {:#x} (block {:#x} + offset {:#x})",
+           module_id, tls_addr, tls_block, tls_offset);
 
     Ok(tls_addr)
 }

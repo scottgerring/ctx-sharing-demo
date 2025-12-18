@@ -29,6 +29,9 @@ pub fn find_symbols_in_process(pid: i32) -> Result<Vec<FoundSymbols>> {
     let proc = Process::new(pid)?;
     let maps = proc.maps().context("Failed to read memory maps")?;
 
+    // Get the main executable path to distinguish PIE executables from shared libraries
+    let exe_path = proc.exe().ok();
+
     let mut results = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
 
@@ -41,9 +44,21 @@ pub fn find_symbols_in_process(pid: i32) -> Result<Vec<FoundSymbols>> {
             }
 
             // Try to find all TLS and OBJECT symbols in this binary
-            if let Ok(symbol_info) = super::elf_reader::find_symbols_in_binary(path) {
+            if let Ok(mut symbol_info) = super::elf_reader::find_symbols_in_binary(path) {
+                // If this is a PIE executable (ET_DYN that wasn't marked as main executable),
+                // check if it's actually the main executable by comparing with /proc/pid/exe
+                if !symbol_info.is_main_executable {
+                    if let Some(ref exe) = exe_path {
+                        if exe == path {
+                            info!("Marking {:?} as main executable (PIE binary)", path);
+                            symbol_info.is_main_executable = true;
+                        }
+                    }
+                }
+
                 if !symbol_info.symbols.is_empty() {
-                    info!("Found {} TLS/OBJECT symbols in: {:?}", symbol_info.symbols.len(), path);
+                    info!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
+                        symbol_info.symbols.len(), path, symbol_info.is_main_executable);
                     results.push(FoundSymbols {
                         pid,
                         path: path.clone(),
