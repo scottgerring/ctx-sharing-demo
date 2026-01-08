@@ -183,6 +183,11 @@ pub fn get_current_record() -> Option<*mut sys::custom_labels_v2_tl_record_t> {
     }
 }
 
+/// Debug helper: get the address of the TLS variable itself (not its value).
+pub fn get_tls_address() -> *const () {
+    unsafe { sys::custom_labels_v2_get_tls_address() as *const () }
+}
+
 /// Execute a function with the given record as the active record.
 pub fn with_record<F, R>(record: Record, f: F) -> R
 where

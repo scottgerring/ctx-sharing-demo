@@ -17,12 +17,56 @@ It needs:
 
 You'll have to run it as root, or give it `CAP_SYS_PTRACE`.
 
+## Reading Modes
+
+The tool supports two reading modes:
+
+### ptrace mode (default)
+```bash
+context-reader <pid> --mode ptrace
+```
+Uses ptrace to attach to threads and read TLS. More compatible but stops threads briefly.
+
+### eBPF mode
+```bash
+context-reader <pid> --mode ebpf
+```
+Uses eBPF perf events to read TLS on CPU samples. Lower overhead, doesn't stop threads.
+
+**Requirements for eBPF mode:**
+- Linux kernel 5.8+ with BTF support
+- `CAP_BPF` and `CAP_PERFMON` capabilities (or root)
+- Build the eBPF program first (see below)
+
+## Building
+
+### Standard build (ptrace mode only)
+```bash
+cargo build --release
+```
+
+### With eBPF support
+First, install the Rust BPF toolchain:
+```bash
+rustup target add bpfel-unknown-none
+cargo install bpf-linker
+```
+
+Then build the eBPF program and userspace:
+```bash
+# Build eBPF program
+cd ebpf && cargo build --release && cd ..
+
+# Build userspace
+cargo build --release
+```
 
 ## How's it work?
 
-At startup, we hunt for configuration for the two label formats, and then having found at least one of them, 
-read them out of the running process. 
+At startup, we hunt for configuration for the two label formats, and then having found at least one of them,
+read them out of the running process.
 
+### ptrace mode
 * We use [procfs](http://docs.rs/procfs/latest/procfs/) to read the current threads out of the process
 * For each thread:
   * Use `ptrace` to attach to the thread, and wait for it to stop
@@ -31,4 +75,14 @@ read them out of the running process.
     * Use `process_vm_readv` via the [nix](https://docs.rs/nix/latest/nix/) crate to read out our TL, and then
       chase the pointers back.
     * Print it to screen!
+
+### eBPF mode
+* Uses [Aya](https://aya-rs.dev/) to load an eBPF program
+* The eBPF program attaches to `perf_event` (CPU clock sampling)
+* On each sample, if the current process matches our target PID:
+  * Read the thread pointer from `task_struct`
+  * Compute TLS addresses using the same logic as ptrace mode
+  * Read labelset/record pointers using `bpf_probe_read_user()`
+  * Emit raw data to userspace via ring buffer
+* Userspace parses the raw data and chases remaining pointers with `process_vm_readv`
 

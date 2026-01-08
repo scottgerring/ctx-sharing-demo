@@ -165,17 +165,28 @@ pub fn get_thread_pointer(tid: i32) -> Result<usize> {
 /// Get FS_BASE register on x86-64 (thread pointer)
 #[cfg(target_arch = "x86_64")]
 fn get_fs_base(tid: i32) -> Result<usize> {
-    use nix::sys::ptrace;
+    // On x86-64, FS_BASE must be read using PTRACE_ARCH_PRCTL with ARCH_GET_FS
+    // These constants are not in the nix crate, so we use libc directly
+    const PTRACE_ARCH_PRCTL: libc::c_uint = 30;
+    const ARCH_GET_FS: libc::c_ulong = 0x1003;
 
-    let thread_pid = Pid::from_raw(tid);
+    let mut fs_base: libc::c_ulong = 0;
 
-    // fs_base is at offset 0x1f8 in the user struct on x86-64
-    const FS_BASE_OFFSET: i64 = 0x1f8;
+    let result = unsafe {
+        libc::ptrace(
+            PTRACE_ARCH_PRCTL as libc::c_uint,
+            tid,
+            &mut fs_base as *mut _ as libc::c_ulong,
+            ARCH_GET_FS,
+        )
+    };
 
-    let value = ptrace::read(thread_pid, FS_BASE_OFFSET as *mut _)
-        .context("Failed to read fs_base register")?;
+    if result == -1 {
+        let err = std::io::Error::last_os_error();
+        anyhow::bail!("Failed to read fs_base register: {}", err);
+    }
 
-    Ok(value as usize)
+    Ok(fs_base as usize)
 }
 
 /// Get TPIDR_EL0 register on aarch64 (thread pointer)

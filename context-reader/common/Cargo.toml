@@ -1,0 +1,12 @@
+[package]
+name = "context-reader-common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Enable this for userspace builds (std environment)
+std = ["aya"]
+
+[dependencies]
+aya = { version = "0.13", default-features = false, optional = true }

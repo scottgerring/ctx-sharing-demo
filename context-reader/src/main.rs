@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 // Generic TLS symbol discovery infrastructure
@@ -14,9 +14,23 @@ mod v1_reader;
 #[cfg(target_os = "linux")]
 mod v2_reader;
 
+// eBPF-based reader
+#[cfg(target_os = "linux")]
+mod ebpf_loader;
+
 // Output formatting
 #[cfg(target_os = "linux")]
 mod output;
+
+/// Reading mode for TLS labels
+#[derive(ValueEnum, Clone, Debug, Default)]
+enum ReadMode {
+    /// Use ptrace to attach and read TLS (default, more compatible)
+    #[default]
+    Ptrace,
+    /// Use eBPF perf events to read TLS (lower overhead, requires newer kernel)
+    Ebpf,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "context-reader")]
@@ -25,9 +39,13 @@ struct Args {
     // The process we're trying to read out of
     pid: i32,
 
-    // How frequently to read in millis
+    // How frequently to read in millis (ptrace mode) or sample frequency in Hz (ebpf mode)
     #[arg(short, long, default_value = "1000")]
     interval: u64,
+
+    /// Reading mode: ptrace (default) or ebpf
+    #[arg(long, value_enum, default_value_t = ReadMode::Ptrace)]
+    mode: ReadMode,
 
     // Print TLS symbols found in the process and exit
     #[arg(long)]
@@ -44,7 +62,7 @@ struct Args {
 
 fn main() -> Result<()> {
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")))
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
@@ -65,12 +83,7 @@ fn main() -> Result<()> {
 fn run(args: Args) -> Result<()> {
     use anyhow::Context;
     use custom_labels::process_context;
-    use nix::sys::ptrace;
-    use nix::unistd::Pid;
-    use std::time::Duration;
-    use tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
-    use tls_symbols::tls_accessor;
-    use tracing::{debug, info};
+    use tracing::info;
 
     // Validate process exists
     let proc = procfs::process::Process::new(args.pid).context("Failed to find process")?;
@@ -102,6 +115,38 @@ fn run(args: Args) -> Result<()> {
         };
         return print_symbols(args.pid, filter, args.include_symtab);
     }
+
+    // Branch based on reading mode
+    match args.mode {
+        ReadMode::Ptrace => run_ptrace_mode(args),
+        ReadMode::Ebpf => run_ebpf_mode(args),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_ebpf_mode(args: Args) -> Result<()> {
+    use tracing::info;
+
+    info!("Starting eBPF mode with sample frequency {}Hz", args.interval);
+
+    // eBPF requires a Tokio runtime for async operations
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        ebpf_loader::run_ebpf(ebpf_loader::EbpfConfig {
+            pid: args.pid,
+            sample_frequency: args.interval,
+        }).await
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn run_ptrace_mode(args: Args) -> Result<()> {
+    use nix::sys::ptrace;
+    use nix::unistd::Pid;
+    use std::time::Duration;
+    use tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
+    use tls_symbols::tls_accessor;
+    use tracing::{debug, info};
 
     // Try to set up readers - collect all that succeed
     let mut readers: Vec<Box<dyn TlsReader>> = Vec::new();

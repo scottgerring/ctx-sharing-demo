@@ -138,12 +138,21 @@ impl FoundSymbols {
 
         // Determine TLS location
         let tls_location = if self.symbol_info.is_main_executable {
-            // Main executable: use static offset
-            let offset = symbol.st_value as usize;
-            info!(
-                "Using static TLS offset for main executable: {:#x}",
-                offset
+            // Main executable: use static offset calculation
+            let st_value = symbol.st_value as usize;
+
+            // Use the pure calculation function with current architecture
+            let offset = super::offset_calc::calculate_static_tls_offset(
+                st_value,
+                self.symbol_info.tls_block_size,
+                super::offset_calc::CURRENT_ARCH,
             );
+
+            info!(
+                "Using static TLS offset for main executable: st_value={:#x}, tls_block_size={:?}, offset={:#x}",
+                st_value, self.symbol_info.tls_block_size, offset
+            );
+
             TlsLocation::MainExecutable { offset }
         } else {
             // Shared library: need to resolve module ID

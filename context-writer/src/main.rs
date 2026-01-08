@@ -129,7 +129,9 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
     let route_key = KeyHandle::new(ROUTE_IDX);
     let user_key = KeyHandle::new(USER_IDX);
 
-    info!(thread_id, "Worker thread started");
+    // Log the TLS variable address for debugging
+    let tls_addr = v2::writer::get_tls_address();
+    info!(thread_id, tls_addr = ?tls_addr, "Worker thread started");
 
     let mut request_count = 0u64;
 

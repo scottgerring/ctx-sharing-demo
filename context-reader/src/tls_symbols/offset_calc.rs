@@ -27,14 +27,21 @@ pub enum Architecture {
 /// The offset to use when calculating the TLS variable address
 pub fn calculate_static_tls_offset(
     st_value: usize,
-    _tls_block_size: Option<usize>,
+    tls_block_size: Option<usize>,
     arch: Architecture,
 ) -> usize {
     match arch {
         Architecture::X86_64 => {
-            // Current (incorrect) behavior: just use st_value directly
-            // This is wrong for x86-64 TLS variant II, but represents current state
-            st_value
+            // TLS variant II: Thread pointer points to END of TLS block
+            // Variables are at NEGATIVE offsets from TP
+            // The st_value is the offset from the START of the TLS block
+            // So: offset_from_tp = tls_block_size - st_value
+            if let Some(block_size) = tls_block_size {
+                block_size.saturating_sub(st_value)
+            } else {
+                // Fallback if PT_TLS not found - use st_value directly (may be incorrect)
+                st_value
+            }
         }
         Architecture::Aarch64 => {
             // TLS variant I: Thread pointer points to TCB
@@ -88,21 +95,20 @@ pub const CURRENT_ARCH: Architecture = Architecture::Aarch64;
 mod tests {
     use super::*;
 
-    // Test x86-64 static TLS offset calculation (CURRENT BROKEN BEHAVIOR)
+    // Test x86-64 static TLS offset calculation (FIXED BEHAVIOR)
     #[test]
     fn test_x86_64_static_tls_offset_with_pt_tls() {
         // Real example from context-writer:
         // PT_TLS p_memsz = 0x158 (344 bytes)
         // custom_labels_current_set_v2 st_value = 0x110 (272)
-        // Current (incorrect) behavior: offset = st_value = 0x110
-        // NOTE: This is WRONG! Should be 0x158 - 0x110 = 0x48
+        // Correct behavior: offset = tls_block_size - st_value = 0x158 - 0x110 = 0x48
         let offset = calculate_static_tls_offset(0x110, Some(0x158), Architecture::X86_64);
-        assert_eq!(offset, 0x110); // TODO: Should be 0x48 after fix
+        assert_eq!(offset, 0x48);
     }
 
     #[test]
     fn test_x86_64_static_tls_offset_without_pt_tls() {
-        // Current behavior: just use st_value
+        // Fallback when PT_TLS not found: use st_value
         let offset = calculate_static_tls_offset(0x110, None, Architecture::X86_64);
         assert_eq!(offset, 0x110);
     }
@@ -110,19 +116,17 @@ mod tests {
     #[test]
     fn test_x86_64_static_tls_offset_at_block_start() {
         // Variable at start of TLS block (st_value = 0)
-        // Current (incorrect): offset = st_value = 0
-        // NOTE: Should be tls_block_size = 0x158 after fix
+        // Offset = tls_block_size - 0 = tls_block_size
         let offset = calculate_static_tls_offset(0, Some(0x158), Architecture::X86_64);
-        assert_eq!(offset, 0); // TODO: Should be 0x158 after fix
+        assert_eq!(offset, 0x158);
     }
 
     #[test]
     fn test_x86_64_static_tls_offset_at_block_end() {
         // Variable at end of TLS block (st_value = tls_block_size = 0x158)
-        // Current (incorrect): offset = st_value = 0x158
-        // NOTE: Should be 0 after fix
+        // Offset = tls_block_size - tls_block_size = 0
         let offset = calculate_static_tls_offset(0x158, Some(0x158), Architecture::X86_64);
-        assert_eq!(offset, 0x158); // TODO: Should be 0 after fix
+        assert_eq!(offset, 0);
     }
 
     // Test aarch64 static TLS offset calculation
@@ -143,15 +147,14 @@ mod tests {
     // Test x86-64 TLS address calculation
     #[test]
     fn test_x86_64_tls_address_calculation() {
-        // With INCORRECT offset (current behavior uses st_value = 0x110)
+        // With correct offset after fix
         // Thread pointer = 0x7f73963fe6c0
-        // Offset = 0x110 (WRONG! Should be 0x48)
-        // Calculated address: 0x7f73963fe6c0 - 0x110 = 0x7f73963fe5b0 (WRONG!)
-        // Expected address should be: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
+        // Offset = 0x48 (correct after fix)
+        // Expected address: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
         let thread_pointer = 0x7f73963fe6c0;
-        let offset = 0x110; // Current broken offset
+        let offset = 0x48;
         let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::X86_64);
-        assert_eq!(addr, 0x7f73963fe5b0); // Wrong address due to wrong offset
+        assert_eq!(addr, 0x7f73963fe678);
     }
 
     #[test]
@@ -207,7 +210,7 @@ mod tests {
         );
     }
 
-    // Integration test: full calculation pipeline (CURRENT BROKEN BEHAVIOR)
+    // Integration test: full calculation pipeline (FIXED BEHAVIOR)
     #[test]
     fn test_x86_64_full_pipeline() {
         // Real-world example from context-writer
@@ -215,15 +218,13 @@ mod tests {
         let tls_block_size = Some(0x158);
         let thread_pointer = 0x7f73963fe6c0;
 
-        // Step 1: Calculate offset (WRONG! Should be 0x158 - 0x110 = 0x48)
+        // Step 1: Calculate offset (correct after fix)
         let offset = calculate_static_tls_offset(st_value, tls_block_size, Architecture::X86_64);
-        assert_eq!(offset, 0x110); // TODO: Should be 0x48 after fix
+        assert_eq!(offset, 0x48); // Correct: 0x158 - 0x110 = 0x48
 
-        // Step 2: Calculate address (WRONG due to wrong offset!)
-        // Gets: 0x7f73963fe6c0 - 0x110 = 0x7f73963fe5b0
-        // Should be: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
+        // Step 2: Calculate address (correct after fix)
         let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::X86_64);
-        assert_eq!(addr, 0x7f73963fe5b0); // TODO: Should be 0x7f73963fe678 after fix
+        assert_eq!(addr, 0x7f73963fe678); // Correct: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
     }
 
     #[test]

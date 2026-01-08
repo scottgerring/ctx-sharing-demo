@@ -1,8 +1,15 @@
 #!/bin/bash
 set -e
 
+# Parse arguments
+USE_EBPF=false
+if [[ "$1" == "--ebpf" ]]; then
+    USE_EBPF=true
+    echo "Using eBPF mode"
+fi
+
 # Set logging levels - reduce noise from elf_reader symbol scanning
-export RUST_LOG="${RUST_LOG:-info,context_reader::tls_symbols::elf_reader=warn}"
+export RUST_LOG="warn"
 
 # Build both projects first to avoid race conditions
 echo "Building context-writer"
@@ -11,6 +18,14 @@ cargo build
 
 echo "Building context-reader..."
 cd "../context-reader"
+
+if [[ "$USE_EBPF" == "true" ]]; then
+    echo "Building eBPF program..."
+    cd ebpf
+    cargo build --release
+    cd ..
+fi
+
 cargo build
 
 # Now start context-writer in the background
@@ -22,8 +37,12 @@ echo "context-writer started with PID: $WRITER_PID"
 
 # Give context-writer a moment to fully start up
 echo "Waiting for context-writer to initialize..."
-sleep 2
+sleep 5
 
 # Start context-reader to monitor context-writer
 echo "Starting context-reader to monitor PID $WRITER_PID..."
-./target/debug/context-reader "$WRITER_PID" --interval 1000
+if [[ "$USE_EBPF" == "true" ]]; then
+    sudo ./target/debug/context-reader "$WRITER_PID" --mode ebpf --interval 99
+else
+    sudo ./target/debug/context-reader "$WRITER_PID" --interval 1000
+fi

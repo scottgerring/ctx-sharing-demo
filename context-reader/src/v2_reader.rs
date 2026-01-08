@@ -111,16 +111,23 @@ impl V2Reader {
     /// Read the raw record bytes from process memory.
     /// Returns None if the record pointer is null.
     fn read_record_memory(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<u8>>> {
+        debug!("V2 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
+        debug!("V2 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
+
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
             ctx.thread_pointer,
             &self.library.tls_location,
         )?;
 
+        debug!("V2 TLS addr for tid {}: {:#x}", ctx.tid, tls_addr);
+
         // Read the pointer to the v2 record
         let mut ptr_bytes = [0u8; 8];
         read_memory(pid, tls_addr, &mut ptr_bytes)?;
         let record_ptr = usize::from_ne_bytes(ptr_bytes);
+
+        debug!("V2 record_ptr for tid {}: {:#x} (raw bytes: {:02x?})", ctx.tid, record_ptr, ptr_bytes);
 
         if record_ptr == 0 {
             return Ok(None);

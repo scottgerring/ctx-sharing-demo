@@ -131,6 +131,9 @@ impl V1Reader {
     fn read_thread_labels(&self, pid: i32, ctx: &ThreadContext) -> Result<Vec<Label>> {
         use tracing::debug;
 
+        debug!("V1 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
+        debug!("V1 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
+
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
             ctx.thread_pointer,

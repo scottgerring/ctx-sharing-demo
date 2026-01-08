@@ -3,7 +3,7 @@ use goblin::elf::{Elf, Sym};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Information about a symbol and where it was found
 #[derive(Debug, Clone)]
@@ -17,6 +17,7 @@ pub struct SymbolEntry {
 pub struct SymbolInfo {
     pub symbols: HashMap<String, SymbolEntry>,
     pub is_main_executable: bool,
+    pub tls_block_size: Option<usize>, // Size of TLS block from PT_TLS (for static TLS)
 }
 
 /// Find all TLS and TLS-related data symbols in an ELF binary at the given path.
@@ -42,7 +43,7 @@ pub fn find_symbols_in_binary(path: &Path) -> Result<SymbolInfo> {
         let sym_type = sym.st_type();
         if sym_type == goblin::elf::sym::STT_TLS || sym_type == goblin::elf::sym::STT_OBJECT {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                info!("Found {} symbol {} in dynsyms",
+                debug!("Found {} symbol {} in dynsyms",
                     if sym_type == goblin::elf::sym::STT_TLS { "TLS" } else { "OBJECT" },
                     name);
                 symbols.insert(name.to_string(), SymbolEntry {
@@ -60,7 +61,7 @@ pub fn find_symbols_in_binary(path: &Path) -> Result<SymbolInfo> {
             if let Some(name) = elf.strtab.get_at(sym.st_name) {
                 // Only add if not already present from dynsyms
                 symbols.entry(name.to_string()).or_insert_with(|| {
-                    info!("Found {} symbol {} in syms",
+                    debug!("Found {} symbol {} in syms",
                         if sym_type == goblin::elf::sym::STT_TLS { "TLS" } else { "OBJECT" },
                         name);
                     SymbolEntry {
@@ -79,9 +80,19 @@ pub fn find_symbols_in_binary(path: &Path) -> Result<SymbolInfo> {
     // determine if this is actually the main executable by checking /proc/pid/exe
     let is_main_executable = elf.header.e_type == goblin::elf::header::ET_EXEC;
 
+    // Find PT_TLS program header to get TLS block size (needed for static TLS offset calculation)
+    let tls_block_size = elf.program_headers.iter()
+        .find(|ph| ph.p_type == goblin::elf::program_header::PT_TLS)
+        .map(|ph| ph.p_memsz as usize);
+
+    if let Some(size) = tls_block_size {
+        debug!("Found PT_TLS header: memsz={:#x} ({})", size, size);
+    }
+
     Ok(SymbolInfo {
         symbols,
         is_main_executable,
+        tls_block_size,
     })
 }
 
