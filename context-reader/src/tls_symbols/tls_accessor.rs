@@ -45,34 +45,14 @@ pub fn get_tls_variable_address_with_thread_pointer(
 
 /// Get TLS address for main executable using static offset (with pre-computed thread pointer).
 fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -> Result<usize> {
-    // The TLS layout differs between architectures:
-    //
-    // x86-64 uses TLS variant II:
-    //   - Thread pointer (fs_base) points to the thread control block (TCB)
-    //   - TLS variables are at NEGATIVE offsets from the thread pointer
-    //   - Formula: tls_addr = thread_pointer - tls_offset
-    //
-    // aarch64 uses TLS variant I:
-    //   - Thread pointer (TPIDR_EL0) points to the Thread Control Block (TCB)
-    //   - TCB is 16 bytes (2 pointers) on aarch64
-    //   - TLS variables are located after the TCB
-    //   - Formula: tls_addr = thread_pointer + TCB_SIZE + tls_offset
+    use super::offset_calc;
 
-    #[cfg(target_arch = "x86_64")]
-    let tls_addr = thread_pointer.wrapping_sub(tls_offset);
-
-    #[cfg(target_arch = "aarch64")]
-    let tls_addr = {
-        const TCB_SIZE: usize = 16;
-        thread_pointer
-            .wrapping_add(TCB_SIZE)
-            .wrapping_add(tls_offset)
-    };
-
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let tls_addr = {
-        anyhow::bail!("Unsupported architecture for TLS calculation");
-    };
+    // Use the pure calculation function with the current architecture
+    let tls_addr = offset_calc::calculate_static_tls_address(
+        thread_pointer,
+        tls_offset,
+        offset_calc::CURRENT_ARCH,
+    );
 
     Ok(tls_addr)
 }

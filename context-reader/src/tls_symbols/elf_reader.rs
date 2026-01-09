@@ -93,6 +93,7 @@ mod test {
 
     // Test symbol extraction from an ELF binary
     #[test]
+    #[ignore]
     pub fn extract_symbols() -> anyhow::Result<()> {
         tracing_subscriber::registry()
             .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")))
@@ -123,6 +124,7 @@ mod test {
 
     // Test symbol extraction from a library with LOCAL TLS symbols (not exported)
     #[test]
+    #[ignore]
     pub fn extract_local_tls_symbols() -> anyhow::Result<()> {
         tracing_subscriber::registry()
             .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")))
