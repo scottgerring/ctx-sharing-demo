@@ -23,8 +23,9 @@ pub const CURRENT_ARCH: Architecture = Architecture::X86_64;
 #[cfg(target_arch = "aarch64")]
 pub const CURRENT_ARCH: Architecture = Architecture::Aarch64;
 
-// When building for BPF target, assume the host architecture
-// BPF programs run in the kernel and read TLS from processes on the same machine
+// When building for BPF target, provide a fallback definition.
+// NOTE: The eBPF program should get the actual architecture from KernelOffsets
+// passed by userspace, not from this compile-time constant.
 #[cfg(all(target_arch = "bpf", target_endian = "little"))]
 pub const CURRENT_ARCH: Architecture = Architecture::X86_64;
 
@@ -123,11 +124,15 @@ pub struct TlsConfig {
 pub struct KernelOffsets {
     /// Offset of thread field in task_struct
     pub task_struct_thread_offset: u64,
-    /// Offset of fsbase field in thread_struct (x86_64)
+    /// Offset of thread pointer field in thread_struct
+    /// - x86_64: fsbase field
+    /// - aarch64: tp_value field
     pub thread_struct_fsbase_offset: u64,
     /// Whether these offsets are valid
     pub valid: u8,
-    pub _pad: [u8; 7],
+    /// Target architecture (0 = x86_64, 1 = aarch64)
+    pub arch: u8,
+    pub _pad: [u8; 6],
 }
 
 /// Label event sent from BPF to userspace via ringbuf.

@@ -232,6 +232,7 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
 
 /// Calculate kernel struct offsets from BTF and configure the map.
 /// This provides kernel version portability without hardcoded offsets.
+/// TODO this is gross; find a better way 
 fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
     // Use pahole to get offsets from BTF
     let task_struct_thread = std::process::Command::new("pahole")
@@ -239,14 +240,14 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
         .output()
         .context("Failed to run pahole - is it installed?")?;
 
-    let thread_struct_fsbase = std::process::Command::new("pahole")
+    let thread_struct_output = std::process::Command::new("pahole")
         .args(&["-C", "thread_struct", "/sys/kernel/btf/vmlinux"])
         .output()
         .context("Failed to run pahole")?;
 
     // Parse pahole output to extract offsets
     let task_output = String::from_utf8_lossy(&task_struct_thread.stdout);
-    let thread_output = String::from_utf8_lossy(&thread_struct_fsbase.stdout);
+    let thread_output = String::from_utf8_lossy(&thread_struct_output.stdout);
 
     // Find "struct thread_struct       thread;               /*  OFFSET     SIZE */"
     let thread_offset = task_output
@@ -259,30 +260,56 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
         })
         .context("Failed to find thread field offset in task_struct")?;
 
-    // Find "long unsigned int          fsbase;               /*    40     8 */"
-    let fsbase_offset = thread_output
-        .lines()
-        .find(|line| line.contains("fsbase;"))
-        .and_then(|line| {
-            let parts: Vec<&str> = line.split("/*").nth(1)?.split_whitespace().collect();
-            parts.first()?.parse::<u64>().ok()
-        })
-        .context("Failed to find fsbase field offset in thread_struct")?;
+    // Find the thread pointer offset - architecture specific:
+    // - x86_64: "fsbase" field in thread_struct
+    // - aarch64: "tp_value" field in thread_struct (inside uw substruct, but offset is from thread_struct start)
+    let (tp_field_name, tp_offset) = if cfg!(target_arch = "x86_64") {
+        let offset = thread_output
+            .lines()
+            .find(|line| line.contains("fsbase;"))
+            .and_then(|line| {
+                let parts: Vec<&str> = line.split("/*").nth(1)?.split_whitespace().collect();
+                parts.first()?.parse::<u64>().ok()
+            })
+            .context("Failed to find fsbase field offset in thread_struct")?;
+        ("fsbase", offset)
+    } else if cfg!(target_arch = "aarch64") {
+        let offset = thread_output
+            .lines()
+            .find(|line| line.contains("tp_value;"))
+            .and_then(|line| {
+                let parts: Vec<&str> = line.split("/*").nth(1)?.split_whitespace().collect();
+                parts.first()?.parse::<u64>().ok()
+            })
+            .context("Failed to find tp_value field offset in thread_struct")?;
+        ("tp_value", offset)
+    } else {
+        anyhow::bail!("Unsupported architecture for eBPF thread pointer access");
+    };
 
     info!(
-        "Calculated kernel offsets from BTF: task_struct.thread={}, thread_struct.fsbase={}",
-        thread_offset, fsbase_offset
+        "Calculated kernel offsets from BTF: task_struct.thread={}, thread_struct.{}={}",
+        thread_offset, tp_field_name, tp_offset
     );
 
     // Configure the BPF map
     let mut offsets_map: HashMap<_, u32, KernelOffsets> =
         HashMap::try_from(bpf.map_mut("KERNEL_OFFSETS").context("KERNEL_OFFSETS map not found")?)?;
 
+    let arch = if cfg!(target_arch = "x86_64") {
+        0 // Architecture::X86_64
+    } else if cfg!(target_arch = "aarch64") {
+        1 // Architecture::Aarch64
+    } else {
+        0 // Default to x86_64
+    };
+
     let offsets = KernelOffsets {
         task_struct_thread_offset: thread_offset,
-        thread_struct_fsbase_offset: fsbase_offset,
+        thread_struct_fsbase_offset: tp_offset,
         valid: 1,
-        _pad: [0; 7],
+        arch,
+        _pad: [0; 6],
     };
 
     offsets_map

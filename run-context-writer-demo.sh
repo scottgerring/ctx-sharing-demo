@@ -20,13 +20,10 @@ echo "Building context-reader..."
 cd "../context-reader"
 
 if [[ "$USE_EBPF" == "true" ]]; then
-    echo "Building eBPF program..."
-    cd ebpf
-    cargo build --release
-    cd ..
+    cargo xtask build
+else
+    cargo build
 fi
-
-cargo build
 
 # Now start context-writer in the background
 echo "Starting context-writer..."
@@ -42,7 +39,7 @@ sleep 5
 # Start context-reader to monitor context-writer
 echo "Starting context-reader to monitor PID $WRITER_PID..."
 if [[ "$USE_EBPF" == "true" ]]; then
-    sudo ./target/debug/context-reader "$WRITER_PID" --mode ebpf --interval 99
+    sudo env RUST_LOG=info ./target/debug/context-reader "$WRITER_PID" --mode ebpf --interval 99
 else
     sudo ./target/debug/context-reader "$WRITER_PID" --interval 1000
 fi

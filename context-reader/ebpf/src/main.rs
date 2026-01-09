@@ -12,7 +12,7 @@ use aya_ebpf::{
 use aya_log_ebpf::debug;
 use context_reader_common::{
     calculate_static_tls_address, Architecture, KernelOffsets, LabelEvent, TlsConfig,
-    MAX_LABEL_DATA_SIZE, CURRENT_ARCH,
+    MAX_LABEL_DATA_SIZE,
 };
 
 /// Target PID we're monitoring (set by userspace)
@@ -67,28 +67,28 @@ fn try_on_cpu_sample(ctx: &PerfEventContext) -> Result<(), i64> {
 
     debug!(ctx, "on_cpu_sample: pid={} tid={}", pid, tid);
 
-    // Get thread pointer from task_struct
-    let thread_pointer = get_thread_pointer()?;
+    // Get thread pointer and architecture from task_struct
+    let (thread_pointer, arch) = get_thread_pointer_and_arch()?;
 
     // Try to read V2 labels
     if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
-        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config);
+        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config, arch);
     }
-    
+
     // Try to read V1 labels
     if let Some(config) = unsafe { V1_TLS_CONFIG.get(&0) } {
-        let _ = read_and_emit_v1(ctx, tid, thread_pointer, config);
+        let _ = read_and_emit_v1(ctx, tid, thread_pointer, config, arch);
     }
 
 
     Ok(())
 }
 
-/// Get thread pointer using kernel offsets provided by userspace.
+/// Get thread pointer and architecture using kernel offsets provided by userspace.
 /// This approach provides portability - userspace calculates offsets from BTF
 /// and passes them to BPF, avoiding hardcoded values.
 #[inline(always)]
-fn get_thread_pointer() -> Result<u64, i64> {
+fn get_thread_pointer_and_arch() -> Result<(u64, Architecture), i64> {
     // Get kernel offsets from map (calculated by userspace from BTF)
     let offsets = unsafe { KERNEL_OFFSETS.get(&0) };
     let Some(offsets) = offsets else {
@@ -99,32 +99,40 @@ fn get_thread_pointer() -> Result<u64, i64> {
         return Err(-3); // Offsets marked as invalid
     }
 
+    // Get architecture from userspace-provided config
+    let arch = if offsets.arch == 1 {
+        Architecture::Aarch64
+    } else {
+        Architecture::X86_64
+    };
+
     let task = unsafe { bpf_get_current_task() };
     if task == 0 {
         return Err(-1);
     }
 
-    // Read task_struct->thread.fsbase using offsets from userspace
-    // Works on x86_64; other architectures would use different field names
+    // Read task_struct->thread.<tp_field> using offsets from userspace
+    // - x86_64: thread.fsbase
+    // - aarch64: thread.tp_value
     let thread_offset = offsets.task_struct_thread_offset as usize;
-    let fsbase_offset = offsets.thread_struct_fsbase_offset as usize;
-    let total_offset = thread_offset + fsbase_offset;
+    let tp_field_offset = offsets.thread_struct_fsbase_offset as usize;
+    let total_offset = thread_offset + tp_field_offset;
 
-    let fsbase_ptr = unsafe { (task as *const u8).add(total_offset) as *const u64 };
-    let fsbase = unsafe { bpf_probe_read_kernel(fsbase_ptr).map_err(|e| e as i64)? };
+    let tp_ptr = unsafe { (task as *const u8).add(total_offset) as *const u64 };
+    let thread_pointer = unsafe { bpf_probe_read_kernel(tp_ptr).map_err(|e| e as i64)? };
 
-    Ok(fsbase)
+    Ok((thread_pointer, arch))
 }
 
 /// Compute TLS variable address from thread pointer and config
 #[inline(always)]
-fn compute_tls_address(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i64> {
+fn compute_tls_address(thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<u64, i64> {
     if config.is_main_executable != 0 {
         // Main executable: use shared calculation logic
         Ok(calculate_static_tls_address(
             thread_pointer,
             config.offset,
-            CURRENT_ARCH,
+            arch,
         ))
     } else {
         // Shared library: need DTV lookup
@@ -168,12 +176,12 @@ fn compute_tls_address(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i
 /// ```
 /// All the work is done here in kernel space, so userspace just needs to unpack the data.
 #[inline(always)]
-fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
+fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v1: tid={}", tid);
 
     let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
-    let tls_addr = compute_tls_address(thread_pointer, config)?;
+    let tls_addr = compute_tls_address(thread_pointer, config, arch)?;
 
     // Read pointer to labelset
     let labelset_ptr: u64 = unsafe {
@@ -300,12 +308,12 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 
 /// Read V2 format labels and emit to ringbuf
 #[inline(always)]
-fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
+fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v2: tid={}", tid);
 
     let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
-    let tls_addr = compute_tls_address(thread_pointer, config)?;
+    let tls_addr = compute_tls_address(thread_pointer, config, arch)?;
 
     // Read pointer to v2 record
     let record_ptr: u64 = unsafe {
