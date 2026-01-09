@@ -144,8 +144,12 @@ pub struct LabelEvent {
     pub data_len: u16,
     /// Pointer to the original data in the target process (for chasing pointers)
     pub ptr: u64,
+    /// Timestamp when eBPF processing started (nanoseconds from bpf_ktime_get_ns)
+    pub start_time_ns: u64,
+    /// Timestamp when eBPF processing completed (nanoseconds from bpf_ktime_get_ns)
+    pub end_time_ns: u64,
     /// Raw data read from the target process
-    /// For V1: labelset header (storage ptr, count, capacity)
+    /// For V1: packed labels in format [count: u8][for each: [key_len: u16][key_data][value_len: u16][value_data]]
     /// For V2: raw binary record
     pub data: [u8; MAX_LABEL_DATA_SIZE],
 }
@@ -158,6 +162,8 @@ impl Default for LabelEvent {
             _pad: [0; 1],
             data_len: 0,
             ptr: 0,
+            start_time_ns: 0,
+            end_time_ns: 0,
             data: [0; MAX_LABEL_DATA_SIZE],
         }
     }

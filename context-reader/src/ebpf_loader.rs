@@ -26,6 +26,40 @@ use crate::tls_symbols::tls_accessor::TlsLocation;
 const V1_SYMBOL: &str = "custom_labels_current_set";
 const V2_SYMBOL: &str = "custom_labels_current_set_v2";
 
+/// Statistics for eBPF execution performance
+struct FormatStats {
+    count: u64,
+    total_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+}
+
+impl FormatStats {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            total_ns: 0,
+            min_ns: u64::MAX,
+            max_ns: 0,
+        }
+    }
+
+    fn record(&mut self, elapsed_ns: u64) {
+        self.count += 1;
+        self.total_ns += elapsed_ns;
+        self.min_ns = self.min_ns.min(elapsed_ns);
+        self.max_ns = self.max_ns.max(elapsed_ns);
+    }
+
+    fn avg_ns(&self) -> u64 {
+        if self.count > 0 {
+            self.total_ns / self.count
+        } else {
+            0
+        }
+    }
+}
+
 /// Configuration for the eBPF loader
 pub struct EbpfConfig {
     pub pid: i32,
@@ -111,8 +145,25 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
 
     // Event processing loop
     let mut iteration = 0u64;
+    let mut v1_stats = FormatStats::new();
+    let mut v2_stats = FormatStats::new();
+
+    let mut shutdown = false;
 
     loop {
+        // Check for Ctrl-C signal
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("\nReceived Ctrl-C, shutting down...");
+                shutdown = true;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        if shutdown {
+            break;
+        }
+
         iteration += 1;
 
         // Check if process still exists
@@ -143,10 +194,14 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
                 // Process based on format version
                 match event.format_version {
                     1 => {
+                        let elapsed_ns = event.end_time_ns.saturating_sub(event.start_time_ns);
+                        v1_stats.record(elapsed_ns);
                         let result = process_v1_event(config.pid, event);
                         v1_results.push(result);
                     }
                     2 => {
+                        let elapsed_ns = event.end_time_ns.saturating_sub(event.start_time_ns);
+                        v2_stats.record(elapsed_ns);
                         let result = process_v2_event(event);
                         v2_results.push(result);
                     }
@@ -166,10 +221,11 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
         if !v2_results.is_empty() {
             output::print_iteration(iteration, "v2-ebpf", &v2_results);
         }
-
-        // Small sleep to avoid busy-looping
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    // Print statistics before exiting
+    print_stats("v1-ebpf", &v1_stats);
+    print_stats("v2-ebpf", &v2_stats);
 
     Ok(())
 }
@@ -524,6 +580,20 @@ fn process_v2_event(event: &LabelEvent) -> ThreadResult {
             error: format!("Parse error: {:?}", e),
         },
     }
+}
+
+/// Print eBPF execution performance statistics
+fn print_stats(name: &str, stats: &FormatStats) {
+    if stats.count == 0 {
+        println!("\n[{}] No events processed", name);
+        return;
+    }
+
+    println!("\n[{}] eBPF Execution Statistics:", name);
+    println!("  Events processed: {}", stats.count);
+    println!("  Min time:         {} ns ({:.3} µs)", stats.min_ns, stats.min_ns as f64 / 1000.0);
+    println!("  Max time:         {} ns ({:.3} µs)", stats.max_ns, stats.max_ns as f64 / 1000.0);
+    println!("  Avg time:         {} ns ({:.3} µs)", stats.avg_ns(), stats.avg_ns() as f64 / 1000.0);
 }
 
 /// Get the number of online CPUs

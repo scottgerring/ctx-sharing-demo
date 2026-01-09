@@ -70,15 +70,16 @@ fn try_on_cpu_sample(ctx: &PerfEventContext) -> Result<(), i64> {
     // Get thread pointer from task_struct
     let thread_pointer = get_thread_pointer()?;
 
+    // Try to read V2 labels
+    if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
+        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config);
+    }
+    
     // Try to read V1 labels
     if let Some(config) = unsafe { V1_TLS_CONFIG.get(&0) } {
         let _ = read_and_emit_v1(ctx, tid, thread_pointer, config);
     }
 
-    // Try to read V2 labels
-    if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
-        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config);
-    }
 
     Ok(())
 }
@@ -170,6 +171,8 @@ fn compute_tls_address(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i
 fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v1: tid={}", tid);
 
+    let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
     let tls_addr = compute_tls_address(thread_pointer, config)?;
 
     // Read pointer to labelset
@@ -210,7 +213,7 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 
     // This seems to be empirically the limit on what we can do
     // and stay under the verifier complexity threshold
-    const MAX_LABELS: usize = 12;
+    const MAX_LABELS: usize = 8;
 
     #[inline(always)]
     fn read_label(
@@ -287,8 +290,10 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
         }
     }
 
+    let end_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
     // Emit the packed label data
-    emit_event(ctx, tid, 1, &scratch[..write_pos], labelset_ptr)?;
+    emit_event(ctx, tid, 1, &scratch[..write_pos], labelset_ptr, start_time, end_time)?;
 
     Ok(())
 }
@@ -297,6 +302,8 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 #[inline(always)]
 fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v2: tid={}", tid);
+
+    let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
     let tls_addr = compute_tls_address(thread_pointer, config)?;
 
@@ -320,14 +327,16 @@ fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
             .map_err(|e| e as i64)?;
     }
 
-    emit_event(ctx, tid, 2, &scratch[..read_size], record_ptr)?;
+    let end_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    emit_event(ctx, tid, 2, &scratch[..read_size], record_ptr, start_time, end_time)?;
 
     Ok(())
 }
 
 /// Emit a label event to the ring buffer
 #[inline(always)]
-fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8], ptr: u64) -> Result<(), i64> {
+fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8], ptr: u64, start_time_ns: u64, end_time_ns: u64) -> Result<(), i64> {
     let mut buf = EVENTS.reserve::<LabelEvent>(0).ok_or(-10)?;
 
     let event = unsafe { &mut *buf.as_mut_ptr() };
@@ -335,6 +344,8 @@ fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8],
     event.format_version = format_version;
     event.data_len = data.len() as u16;
     event.ptr = ptr;
+    event.start_time_ns = start_time_ns;
+    event.end_time_ns = end_time_ns;
 
     // Copy data (bounded by MAX_LABEL_DATA_SIZE)
     let copy_len = data.len().min(MAX_LABEL_DATA_SIZE);
