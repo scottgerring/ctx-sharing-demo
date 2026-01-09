@@ -6,6 +6,7 @@ use std::time::Duration;
 use custom_labels::v2::process_context_ext::ProcessContextTlsExt;
 use custom_labels::process_context::{ProcessContext, ProcessContextWriter};
 use custom_labels::v2::{self, KeyHandle};
+use custom_labels::Labelset;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use tracing::{info, Level};
@@ -157,26 +158,35 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
             "Attaching context"
         );
 
-        // Attach the context to TLS
-        v2::writer::set_current_record(Some(&span_id), |builder| {
-            builder.set_trace(&trace_id, &span_id, &root_span_id);
-            builder.set_attr_str(method_key, method).unwrap();
-            builder.set_attr_str(route_key, route).unwrap();
-            builder.set_attr_str(user_key, user).unwrap();
+        // Create v1 labelset with the context
+        let mut labelset = Labelset::new();
+        labelset.set("method", method);
+        labelset.set("route", route);
+        labelset.set("user", user);
+
+        // Execute with both v1 and v2 labels active
+        labelset.enter(|| {
+            // Attach the context to TLS (v2 format)
+            v2::writer::set_current_record(Some(&span_id), |builder| {
+                builder.set_trace(&trace_id, &span_id, &root_span_id);
+                builder.set_attr_str(method_key, method).unwrap();
+                builder.set_attr_str(route_key, route).unwrap();
+                builder.set_attr_str(user_key, user).unwrap();
+            });
+
+            // Simulate some work with the context attached
+            let work_duration = rng.gen_range(MIN_PAUSE_MS..=MAX_PAUSE_MS);
+            thread::sleep(Duration::from_millis(work_duration));
+
+            // Detach the v2 context
+            info!(
+                thread_id,
+                request_count,
+                work_duration_ms = work_duration,
+                "Detaching context"
+            );
+            v2::writer::clear_current_record();
         });
-
-        // Simulate some work with the context attached
-        let work_duration = rng.gen_range(MIN_PAUSE_MS..=MAX_PAUSE_MS);
-        thread::sleep(Duration::from_millis(work_duration));
-
-        // Detach the context
-        info!(
-            thread_id,
-            request_count,
-            work_duration_ms = work_duration,
-            "Detaching context"
-        );
-        v2::writer::clear_current_record();
 
         // Brief pause between requests
         let pause_duration = rng.gen_range(MIN_PAUSE_MS / 2..=MAX_PAUSE_MS / 2);

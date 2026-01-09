@@ -1,3 +1,6 @@
+# This package is not part of the parent workspace - it builds for a different target
+[workspace]
+
 [package]
 name = "context-reader-ebpf"
 version = "0.1.0"

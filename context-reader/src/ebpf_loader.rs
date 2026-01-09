@@ -310,28 +310,19 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
 }
 
 /// Process a V1 format event
-/// V1 events contain the labelset header; we need to chase pointers to read actual labels
-fn process_v1_event(pid: i32, event: &LabelEvent) -> ThreadResult {
-
-    // The event data contains: { storage: *mut Label, count: usize, capacity: usize }
-    if event.data_len < 24 {
+/// V1 events now contain packed label data in the format:
+/// [count: u8][for each label: [key_len: u16][key_data][value_len: u16][value_data]]
+fn process_v1_event(_pid: i32, event: &LabelEvent) -> ThreadResult {
+    if event.data_len < 1 {
         return ThreadResult::Error {
             tid: event.tid as i32,
             error: "V1 event too small".to_string(),
         };
     }
 
-    let storage_ptr = u64::from_ne_bytes(event.data[0..8].try_into().unwrap()) as usize;
-    let count = u64::from_ne_bytes(event.data[8..16].try_into().unwrap()) as usize;
+    let data = &event.data[..event.data_len as usize];
 
-    if storage_ptr == 0 || count == 0 {
-        return ThreadResult::NotFound {
-            tid: event.tid as i32,
-        };
-    }
-
-    // Chase pointers to read actual labels (using process_vm_readv from userspace)
-    match read_v1_labels_from_storage(pid, storage_ptr, count) {
+    match parse_v1_packed_labels(data) {
         Ok(labels) if labels.is_empty() => ThreadResult::NotFound {
             tid: event.tid as i32,
         },
@@ -344,6 +335,60 @@ fn process_v1_event(pid: i32, event: &LabelEvent) -> ThreadResult {
             error: format!("{:#}", e),
         },
     }
+}
+
+/// Parse V1 packed label format sent from eBPF
+fn parse_v1_packed_labels(data: &[u8]) -> Result<Vec<Label>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let count = data[0] as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut labels = Vec::new();
+    let mut pos = 1;
+
+    for _ in 0..count {
+        // Read key length (2 bytes, little-endian)
+        if pos + 2 > data.len() {
+            anyhow::bail!("Truncated key length at position {}", pos);
+        }
+        let key_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        // Read key data
+        if pos + key_len > data.len() {
+            anyhow::bail!("Truncated key data at position {}", pos);
+        }
+        let key = String::from_utf8_lossy(&data[pos..pos + key_len]).into_owned();
+        pos += key_len;
+
+        // Read value length (2 bytes, little-endian)
+        if pos + 2 > data.len() {
+            anyhow::bail!("Truncated value length at position {}", pos);
+        }
+        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        // Read value data
+        if pos + value_len > data.len() {
+            anyhow::bail!("Truncated value data at position {}", pos);
+        }
+
+        let value = if matches!(key.as_str(), "trace_id" | "span_id" | "local_root_span_id") {
+            LabelValue::Bytes(data[pos..pos + value_len].to_vec())
+        } else {
+            LabelValue::Text(String::from_utf8_lossy(&data[pos..pos + value_len]).into_owned())
+        };
+        pos += value_len;
+
+        labels.push(Label { key, value });
+    }
+
+    Ok(labels)
 }
 
 /// Read V1 labels by chasing pointers from the storage array

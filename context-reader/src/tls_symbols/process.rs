@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use procfs::process::{MMapPath, Process};
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{debug, info};
 
 use super::dynamic_linker;
 use super::elf_reader::SymbolInfo;
@@ -50,14 +50,14 @@ pub fn find_symbols_in_process(pid: i32) -> Result<Vec<FoundSymbols>> {
                 if !symbol_info.is_main_executable {
                     if let Some(ref exe) = exe_path {
                         if exe == path {
-                            info!("Marking {:?} as main executable (PIE binary)", path);
+                            debug!("Marking {:?} as main executable (PIE binary)", path);
                             symbol_info.is_main_executable = true;
                         }
                     }
                 }
 
                 if !symbol_info.symbols.is_empty() {
-                    info!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
+                    debug!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
                         symbol_info.symbols.len(), path, symbol_info.is_main_executable);
                     results.push(FoundSymbols {
                         pid,
@@ -139,14 +139,14 @@ impl FoundSymbols {
         // Determine TLS location
         let tls_location = if self.symbol_info.is_main_executable {
             // Main executable: use static offset calculation
-            let st_value = symbol.st_value as usize;
+            let st_value = symbol.st_value as u64;
 
-            // Use the pure calculation function with current architecture
-            let offset = super::offset_calc::calculate_static_tls_offset(
+            // Use the shared calculation function with current architecture
+            let offset = context_reader_common::calculate_static_tls_offset(
                 st_value,
-                self.symbol_info.tls_block_size,
-                super::offset_calc::CURRENT_ARCH,
-            );
+                self.symbol_info.tls_block_size.map(|s| s as u64),
+                context_reader_common::CURRENT_ARCH,
+            ) as usize;
 
             info!(
                 "Using static TLS offset for main executable: st_value={:#x}, tls_block_size={:?}, offset={:#x}",

@@ -9,8 +9,11 @@ use aya_ebpf::{
     programs::PerfEventContext,
     EbpfContext,
 };
-use aya_log_ebpf::info;
-use context_reader_common::{KernelOffsets, LabelEvent, TlsConfig, MAX_LABEL_DATA_SIZE};
+use aya_log_ebpf::debug;
+use context_reader_common::{
+    calculate_static_tls_address, Architecture, KernelOffsets, LabelEvent, TlsConfig,
+    MAX_LABEL_DATA_SIZE, CURRENT_ARCH,
+};
 
 /// Target PID we're monitoring (set by userspace)
 #[map]
@@ -62,39 +65,19 @@ fn try_on_cpu_sample(ctx: &PerfEventContext) -> Result<(), i64> {
         return Ok(());
     }
 
-    // Log that we caught the target process
-    info!(ctx, "Caught target PID {} TID {}", pid, tid);
+    debug!(ctx, "on_cpu_sample: pid={} tid={}", pid, tid);
 
     // Get thread pointer from task_struct
-    let thread_pointer = match get_thread_pointer() {
-        Ok(tp) => {
-            info!(ctx, "PID={} TID={} Thread pointer (fsbase)={}", pid, tid, tp);
-            tp
-        }
-        Err(e) => {
-            info!(ctx, "PID={} TID={} Failed to get thread pointer: {}", pid, tid, e);
-            return Err(e);
-        }
-    };
+    let thread_pointer = get_thread_pointer()?;
 
     // Try to read V1 labels
     if let Some(config) = unsafe { V1_TLS_CONFIG.get(&0) } {
-        info!(ctx, "About to call read_and_emit_v1");
-        match read_and_emit_v1(ctx, tid, thread_pointer, config) {
-            Ok(()) => info!(ctx, "V1 event emitted successfully!!!!11"),
-            Err(e) => info!(ctx, "V1 failed: error {}", e),
-        }
+        let _ = read_and_emit_v1(ctx, tid, thread_pointer, config);
     }
 
     // Try to read V2 labels
     if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
-        info!(ctx, "About to call read_and_emit_v2");
-        match read_and_emit_v2(ctx, tid, thread_pointer, config) {
-            Ok(()) => info!(ctx, "V2 event emitted successfully"),
-            Err(e) => info!(ctx, "V2 failed: error {}", e),
-        }
-    } else {
-        info!(ctx, "No V2 config found");
+        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config);
     }
 
     Ok(())
@@ -136,11 +119,12 @@ fn get_thread_pointer() -> Result<u64, i64> {
 #[inline(always)]
 fn compute_tls_address(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i64> {
     if config.is_main_executable != 0 {
-        // Main executable: static offset from thread pointer
-        // x86_64 uses TLS variant II: address = thread_pointer - offset
-        // aarch64 uses TLS variant I: address = thread_pointer + TCB_SIZE + offset
-        // For now, assume x86_64 (variant II)
-        Ok(thread_pointer.wrapping_sub(config.offset))
+        // Main executable: use shared calculation logic
+        Ok(calculate_static_tls_address(
+            thread_pointer,
+            config.offset,
+            CURRENT_ARCH,
+        ))
     } else {
         // Shared library: need DTV lookup
         // DTV pointer is at thread_pointer + 0 on both architectures
@@ -170,45 +154,141 @@ fn compute_tls_address(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i
     }
 }
 
-/// Read V1 format labels and emit to ringbuf
+/// Read V1 format labels and emit to ringbuf.
+///
+/// This walks the entire labelset structure in eBPF and packs the labels into a simple format:
+/// ```
+/// [count: u8]
+/// For each label:
+///   [key_len: u16 little-endian]
+///   [key_data: key_len bytes]
+///   [value_len: u16 little-endian]
+///   [value_data: value_len bytes]
+/// ```
+/// All the work is done here in kernel space, so userspace just needs to unpack the data.
 #[inline(always)]
 fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
-    info!(ctx, "read_and_emit_v1: START");
+    debug!(ctx, "read_and_emit_v1: tid={}", tid);
 
     let tls_addr = compute_tls_address(thread_pointer, config)?;
-    info!(ctx, "read_and_emit_v1: computed tls_addr");
 
     // Read pointer to labelset
     let labelset_ptr: u64 = unsafe {
         bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)?
     };
-    info!(ctx, "read_and_emit_v1: read labelset_ptr={}", labelset_ptr);
 
     if labelset_ptr == 0 {
-        info!(ctx, "read_and_emit_v1: labelset_ptr is 0, returning");
         return Ok(()); // No labels set
     }
 
-    // V1 labelset structure: { storage: *mut Label, count: usize, capacity: usize }
-    // We'll read the raw structure and pass to userspace for parsing
-
-    // Get scratch buffer
+    // Get scratch buffer for building the packed label data
     let scratch = unsafe { SCRATCH.get_ptr_mut(0).ok_or(-1)? };
     let scratch = unsafe { &mut *scratch };
-    info!(ctx, "read_and_emit_v1: got scratch buffer");
 
-    // Read labelset header (24 bytes on 64-bit)
-    const LABELSET_HEADER_SIZE: usize = 24;
+    // Read labelset header: { storage: *mut Label, count: usize, capacity: usize }
+    let mut labelset_header = [0u64; 3];
     unsafe {
-        bpf_probe_read_user_buf(labelset_ptr as *const u8, &mut scratch[..LABELSET_HEADER_SIZE])
-            .map_err(|e| e as i64)?;
+        for i in 0..3 {
+            labelset_header[i] = bpf_probe_read_user((labelset_ptr + i as u64 * 8) as *const u64)
+                .map_err(|e| e as i64)?;
+        }
     }
-    info!(ctx, "read_and_emit_v1: read labelset header");
 
-    // Emit event with raw data for userspace to parse
-    info!(ctx, "read_and_emit_v1: about to call emit_event");
-    emit_event(ctx, tid, 1, &scratch[..LABELSET_HEADER_SIZE], labelset_ptr)?;
-    info!(ctx, "read_and_emit_v1: emit_event returned Ok");
+    let storage_ptr = labelset_header[0];
+    let count = labelset_header[1] as usize;
+
+    if count == 0 || storage_ptr == 0 {
+        return Ok(()); // Empty labelset
+    }
+
+    // Track write position in scratch buffer
+    let mut write_pos: usize = 0;
+
+    // Write label count (1 byte)
+    scratch[write_pos] = count.min(255) as u8;
+    write_pos += 1;
+
+    // This seems to be empirically the limit on what we can do
+    // and stay under the verifier complexity threshold
+    const MAX_LABELS: usize = 12;
+
+    #[inline(always)]
+    fn read_label(
+        storage_ptr: u64,
+        index: usize,
+        scratch: &mut [u8],
+        write_pos: &mut usize,
+    ) -> Result<(), i64> {
+        let label_addr = storage_ptr + (index as u64 * 32);
+
+        // Read label structure: [key_len, key_buf, value_len, value_buf]
+        let key_len: u64 = unsafe {
+            bpf_probe_read_user(label_addr as *const u64).map_err(|e| e as i64)?
+        };
+        let key_buf: u64 = unsafe {
+            bpf_probe_read_user((label_addr + 8) as *const u64).map_err(|e| e as i64)?
+        };
+        let value_len: u64 = unsafe {
+            bpf_probe_read_user((label_addr + 16) as *const u64).map_err(|e| e as i64)?
+        };
+        let value_buf: u64 = unsafe {
+            bpf_probe_read_user((label_addr + 24) as *const u64).map_err(|e| e as i64)?
+        };
+
+        // Limit string sizes to ensure we fit in MAX_LABEL_DATA_SIZE (1024 bytes)
+        // With MAX_STRING_LEN=32 and MAX_LABELS=8:
+        // Worst case = 1 (count) + 8 × (2 + 32 + 2 + 32) = 545 bytes < 1024
+        const MAX_STRING_LEN: usize = 32;
+        let key_len = (key_len as usize).min(MAX_STRING_LEN);
+        let value_len = (value_len as usize).min(MAX_STRING_LEN);
+
+        // Check space
+        if *write_pos + 2 + key_len + 2 + value_len > MAX_LABEL_DATA_SIZE {
+            return Err(-1);
+        }
+
+        // Write key length (2 bytes)
+        scratch[*write_pos] = (key_len & 0xFF) as u8;
+        scratch[*write_pos + 1] = ((key_len >> 8) & 0xFF) as u8;
+        *write_pos += 2;
+
+        // Read key data
+        unsafe {
+            bpf_probe_read_user_buf(
+                key_buf as *const u8,
+                &mut scratch[*write_pos..*write_pos + key_len],
+            )
+            .map_err(|e| e as i64)?;
+        }
+        *write_pos += key_len;
+
+        // Write value length (2 bytes)
+        scratch[*write_pos] = (value_len & 0xFF) as u8;
+        scratch[*write_pos + 1] = ((value_len >> 8) & 0xFF) as u8;
+        *write_pos += 2;
+
+        // Read value data
+        unsafe {
+            bpf_probe_read_user_buf(
+                value_buf as *const u8,
+                &mut scratch[*write_pos..*write_pos + value_len],
+            )
+            .map_err(|e| e as i64)?;
+        }
+        *write_pos += value_len;
+
+        Ok(())
+    }
+
+    // Bounded loop - verifier can prove this terminates after MAX_LABELS iterations
+    for i in 0..MAX_LABELS {
+        if i < count {
+            read_label(storage_ptr, i, scratch, &mut write_pos)?;
+        }
+    }
+
+    // Emit the packed label data
+    emit_event(ctx, tid, 1, &scratch[..write_pos], labelset_ptr)?;
 
     Ok(())
 }
@@ -216,49 +296,31 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 /// Read V2 format labels and emit to ringbuf
 #[inline(always)]
 fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig) -> Result<(), i64> {
-    info!(ctx, "read_and_emit_v2: START");
+    debug!(ctx, "read_and_emit_v2: tid={}", tid);
 
     let tls_addr = compute_tls_address(thread_pointer, config)?;
-    info!(ctx, "read_and_emit_v2: TP={} offset={} -> tls_addr={}", thread_pointer, config.offset, tls_addr);
 
-    // Read pointer to v2 record - read as byte array to see exact bytes
-    let mut ptr_bytes = [0u8; 8];
-    unsafe {
-        for i in 0..8 {
-            ptr_bytes[i] = bpf_probe_read_user((tls_addr + i as u64) as *const u8).map_err(|e| e as i64)?;
-        }
-    }
-    let record_ptr = u64::from_ne_bytes(ptr_bytes);
-    info!(ctx, "read_and_emit_v2: read bytes [{} {} {} {} {} {} {} {}] -> ptr={}",
-        ptr_bytes[0], ptr_bytes[1], ptr_bytes[2], ptr_bytes[3],
-        ptr_bytes[4], ptr_bytes[5], ptr_bytes[6], ptr_bytes[7], record_ptr);
+    // Read pointer to v2 record
+    let record_ptr: u64 = unsafe {
+        bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)?
+    };
 
     if record_ptr == 0 {
-        info!(ctx, "read_and_emit_v2: record_ptr is 0, returning");
         return Ok(()); // No record set
     }
 
     // Get scratch buffer
     let scratch = unsafe { SCRATCH.get_ptr_mut(0).ok_or(-1)? };
     let scratch = unsafe { &mut *scratch };
-    info!(ctx, "read_and_emit_v2: got scratch buffer");
 
     // Read V2 record using the actual max_record_size from config
     let read_size = (config.max_record_size as usize).min(MAX_LABEL_DATA_SIZE);
-    info!(ctx, "read_and_emit_v2: about to read {} bytes from record_ptr (config.max_record_size={})", read_size, config.max_record_size);
     unsafe {
         bpf_probe_read_user_buf(record_ptr as *const u8, &mut scratch[..read_size])
-            .map_err(|e| {
-                info!(ctx, "read_and_emit_v2: bpf_probe_read_user_buf FAILED with error {}", e);
-                e as i64
-            })?;
+            .map_err(|e| e as i64)?;
     }
-    info!(ctx, "read_and_emit_v2: read record data");
 
-    // Emit event with raw record data
-    info!(ctx, "read_and_emit_v2: about to call emit_event");
     emit_event(ctx, tid, 2, &scratch[..read_size], record_ptr)?;
-    info!(ctx, "read_and_emit_v2: emit_event returned Ok");
 
     Ok(())
 }
@@ -266,11 +328,7 @@ fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 /// Emit a label event to the ring buffer
 #[inline(always)]
 fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8], ptr: u64) -> Result<(), i64> {
-    info!(ctx, "emit_event: ENTERED tid={} format={} data_len={}", tid, format_version, data.len());
-
-    info!(ctx, "emit_event: calling reserve");
     let mut buf = EVENTS.reserve::<LabelEvent>(0).ok_or(-10)?;
-    info!(ctx, "emit_event: reserve succeeded");
 
     let event = unsafe { &mut *buf.as_mut_ptr() };
     event.tid = tid;
@@ -281,10 +339,9 @@ fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8],
     // Copy data (bounded by MAX_LABEL_DATA_SIZE)
     let copy_len = data.len().min(MAX_LABEL_DATA_SIZE);
     event.data[..copy_len].copy_from_slice(&data[..copy_len]);
-    info!(ctx, "emit_event: data copied, calling submit");
 
     buf.submit(0);
-    info!(ctx, "emit_event: submit completed");
+    debug!(ctx, "emit_event: tid={} format={}", tid, format_version);
 
     Ok(())
 }

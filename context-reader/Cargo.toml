@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "common", "xtask"]
+exclude = ["ebpf"]
+resolver = "2"
+
 [package]
 name = "context-reader"
 version = "0.1.0"
@@ -27,7 +32,3 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal"
 bytes = "1"
 
 custom-labels = { path = "../custom-labels" }
-
-[[bin]]
-name = "ringbuf-test"
-path = "src/ringbuf_test.rs"

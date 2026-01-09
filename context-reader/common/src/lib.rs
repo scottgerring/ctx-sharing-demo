@@ -6,7 +6,96 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 /// Maximum size of label data we can transfer per event
-pub const MAX_LABEL_DATA_SIZE: usize = 1024;
+pub const MAX_LABEL_DATA_SIZE: usize = 2048;
+
+/// Target architecture for TLS calculations
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Architecture {
+    X86_64 = 0,
+    Aarch64 = 1,
+}
+
+/// Get the current architecture at compile time
+#[cfg(target_arch = "x86_64")]
+pub const CURRENT_ARCH: Architecture = Architecture::X86_64;
+
+#[cfg(target_arch = "aarch64")]
+pub const CURRENT_ARCH: Architecture = Architecture::Aarch64;
+
+// When building for BPF target, assume the host architecture
+// BPF programs run in the kernel and read TLS from processes on the same machine
+#[cfg(all(target_arch = "bpf", target_endian = "little"))]
+pub const CURRENT_ARCH: Architecture = Architecture::X86_64;
+
+#[cfg(all(target_arch = "bpf", target_endian = "big"))]
+pub const CURRENT_ARCH: Architecture = Architecture::Aarch64;
+
+/// Calculate the TLS offset for a symbol in the main executable's static TLS block.
+///
+/// This handles the architecture-specific differences in TLS layout:
+/// - x86-64 (TLS variant II): Thread pointer points to end of TLS block, variables
+///   are at negative offsets. Offset = tls_block_size - st_value
+/// - aarch64 (TLS variant I): Thread pointer points to TCB, variables are at positive
+///   offsets after TCB. Offset = st_value
+#[inline]
+pub fn calculate_static_tls_offset(
+    st_value: u64,
+    tls_block_size: Option<u64>,
+    arch: Architecture,
+) -> u64 {
+    match arch {
+        Architecture::X86_64 => {
+            // TLS variant II: Thread pointer points to END of TLS block
+            // Variables are at NEGATIVE offsets from TP
+            if let Some(block_size) = tls_block_size {
+                block_size.saturating_sub(st_value)
+            } else {
+                st_value
+            }
+        }
+        Architecture::Aarch64 => {
+            // TLS variant I: st_value IS the offset
+            st_value
+        }
+    }
+}
+
+/// Calculate the absolute address of a TLS variable using static TLS.
+///
+/// This applies the architecture-specific formula to get from the thread pointer
+/// to the actual TLS variable address.
+#[inline]
+pub fn calculate_static_tls_address(
+    thread_pointer: u64,
+    offset: u64,
+    arch: Architecture,
+) -> u64 {
+    match arch {
+        Architecture::X86_64 => {
+            // TLS variant II: subtract offset from thread pointer
+            thread_pointer.wrapping_sub(offset)
+        }
+        Architecture::Aarch64 => {
+            // TLS variant I: add TCB size and offset to thread pointer
+            const AARCH64_TCB_SIZE: u64 = 16;
+            thread_pointer
+                .wrapping_add(AARCH64_TCB_SIZE)
+                .wrapping_add(offset)
+        }
+    }
+}
+
+/// Calculate the final TLS address from thread pointer and TLS configuration.
+/// Handles both main executable (static TLS) and shared library (DTV) cases.
+///
+/// For shared libraries, the DTV lookup must be done by the caller - this function
+/// just handles the address arithmetic once you have the TLS block pointer.
+#[inline]
+pub fn compute_tls_address_static(thread_pointer: u64, offset: u64) -> u64 {
+    // For now assume x86_64, but caller should use calculate_static_tls_address with proper arch
+    calculate_static_tls_address(thread_pointer, offset, CURRENT_ARCH)
+}
 
 /// TLS configuration for a symbol.
 /// Passed from userspace to BPF via map.
@@ -108,3 +197,155 @@ unsafe impl aya::Pod for TlsConfig {}
 unsafe impl aya::Pod for LabelEvent {}
 #[cfg(feature = "std")]
 unsafe impl aya::Pod for KernelOffsets {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test x86-64 static TLS offset calculation
+    #[test]
+    fn test_x86_64_static_tls_offset_with_pt_tls() {
+        // Real example from context-writer:
+        // PT_TLS p_memsz = 0x158 (344 bytes)
+        // custom_labels_current_set_v2 st_value = 0x110 (272)
+        // Correct behavior: offset = tls_block_size - st_value = 0x158 - 0x110 = 0x48
+        let offset = calculate_static_tls_offset(0x110, Some(0x158), Architecture::X86_64);
+        assert_eq!(offset, 0x48);
+    }
+
+    #[test]
+    fn test_x86_64_static_tls_offset_without_pt_tls() {
+        // Fallback when PT_TLS not found: use st_value
+        let offset = calculate_static_tls_offset(0x110, None, Architecture::X86_64);
+        assert_eq!(offset, 0x110);
+    }
+
+    #[test]
+    fn test_x86_64_static_tls_offset_at_block_start() {
+        // Variable at start of TLS block (st_value = 0)
+        // Offset = tls_block_size - 0 = tls_block_size
+        let offset = calculate_static_tls_offset(0, Some(0x158), Architecture::X86_64);
+        assert_eq!(offset, 0x158);
+    }
+
+    #[test]
+    fn test_x86_64_static_tls_offset_at_block_end() {
+        // Variable at end of TLS block (st_value = tls_block_size = 0x158)
+        // Offset = tls_block_size - tls_block_size = 0
+        let offset = calculate_static_tls_offset(0x158, Some(0x158), Architecture::X86_64);
+        assert_eq!(offset, 0);
+    }
+
+    // Test aarch64 static TLS offset calculation
+    #[test]
+    fn test_aarch64_static_tls_offset() {
+        // For aarch64, st_value is used directly as the offset
+        let offset = calculate_static_tls_offset(0x110, Some(0x158), Architecture::Aarch64);
+        assert_eq!(offset, 0x110);
+    }
+
+    #[test]
+    fn test_aarch64_static_tls_offset_ignores_block_size() {
+        // aarch64 doesn't use tls_block_size, only st_value
+        let offset = calculate_static_tls_offset(0x110, None, Architecture::Aarch64);
+        assert_eq!(offset, 0x110);
+    }
+
+    // Test x86-64 TLS address calculation
+    #[test]
+    fn test_x86_64_tls_address_calculation() {
+        // With correct offset after fix
+        // Thread pointer = 0x7f73963fe6c0
+        // Offset = 0x48 (correct after fix)
+        // Expected address: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
+        let thread_pointer = 0x7f73963fe6c0;
+        let offset = 0x48;
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::X86_64);
+        assert_eq!(addr, 0x7f73963fe678);
+    }
+
+    #[test]
+    fn test_x86_64_tls_address_with_zero_offset() {
+        // Variable at the thread pointer location
+        let thread_pointer = 0x7f73963fe6c0;
+        let addr = calculate_static_tls_address(thread_pointer, 0, Architecture::X86_64);
+        assert_eq!(addr, thread_pointer);
+    }
+
+    // Test aarch64 TLS address calculation
+    #[test]
+    fn test_aarch64_tls_address_calculation() {
+        // Thread pointer = 0x7f73963fe6c0
+        // TCB size = 16 (0x10)
+        // Offset = 0x110
+        // Expected: 0x7f73963fe6c0 + 0x10 + 0x110 = 0x7f73963fe7e0
+        let thread_pointer = 0x7f73963fe6c0;
+        let offset = 0x110;
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::Aarch64);
+        assert_eq!(addr, 0x7f73963fe7e0);
+    }
+
+    #[test]
+    fn test_aarch64_tls_address_with_zero_offset() {
+        // Variable right after TCB
+        let thread_pointer = 0x7f73963fe6c0;
+        let addr = calculate_static_tls_address(thread_pointer, 0, Architecture::Aarch64);
+        assert_eq!(addr, thread_pointer + 16); // Just after 16-byte TCB
+    }
+
+    // Test wrapping behavior (important for address arithmetic)
+    #[test]
+    fn test_x86_64_address_wrapping() {
+        // Ensure we handle address wrapping correctly
+        let thread_pointer = 0x100;
+        let offset = 0x200; // Larger than thread_pointer
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::X86_64);
+        // Should wrap: 0x100 - 0x200 = 0xffffff...00 (in 64-bit)
+        assert_eq!(addr, thread_pointer.wrapping_sub(offset));
+    }
+
+    #[test]
+    fn test_aarch64_address_wrapping() {
+        // Ensure we handle address wrapping correctly
+        let thread_pointer = u64::MAX - 100;
+        let offset = 200;
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::Aarch64);
+        // Should wrap around
+        assert_eq!(
+            addr,
+            thread_pointer.wrapping_add(16).wrapping_add(offset)
+        );
+    }
+
+    // Integration test: full calculation pipeline
+    #[test]
+    fn test_x86_64_full_pipeline() {
+        // Real-world example from context-writer
+        let st_value = 0x110;
+        let tls_block_size = Some(0x158);
+        let thread_pointer = 0x7f73963fe6c0;
+
+        // Step 1: Calculate offset (correct after fix)
+        let offset = calculate_static_tls_offset(st_value, tls_block_size, Architecture::X86_64);
+        assert_eq!(offset, 0x48); // Correct: 0x158 - 0x110 = 0x48
+
+        // Step 2: Calculate address (correct after fix)
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::X86_64);
+        assert_eq!(addr, 0x7f73963fe678); // Correct: 0x7f73963fe6c0 - 0x48 = 0x7f73963fe678
+    }
+
+    #[test]
+    fn test_aarch64_full_pipeline() {
+        let st_value = 0x110;
+        let tls_block_size = Some(0x158);
+        let thread_pointer = 0x7f73963fe6c0;
+
+        // Step 1: Calculate offset (just st_value for aarch64)
+        let offset = calculate_static_tls_offset(st_value, tls_block_size, Architecture::Aarch64);
+        assert_eq!(offset, 0x110);
+
+        // Step 2: Calculate address (TP + TCB + offset)
+        let addr = calculate_static_tls_address(thread_pointer, offset, Architecture::Aarch64);
+        assert_eq!(addr, 0x7f73963fe7e0);
+    }
+}

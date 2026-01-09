@@ -45,16 +45,16 @@ pub fn get_tls_variable_address_with_thread_pointer(
 
 /// Get TLS address for main executable using static offset (with pre-computed thread pointer).
 fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -> Result<usize> {
-    use super::offset_calc;
+    use context_reader_common::{calculate_static_tls_address, CURRENT_ARCH};
 
     // Use the pure calculation function with the current architecture
-    let tls_addr = offset_calc::calculate_static_tls_address(
-        thread_pointer,
-        tls_offset,
-        offset_calc::CURRENT_ARCH,
+    let tls_addr = calculate_static_tls_address(
+        thread_pointer as u64,
+        tls_offset as u64,
+        CURRENT_ARCH,
     );
 
-    Ok(tls_addr)
+    Ok(tls_addr as usize)
 }
 
 /// Get TLS address for shared library using DTV (with pre-computed thread pointer).
