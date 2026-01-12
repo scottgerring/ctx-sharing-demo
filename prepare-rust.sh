@@ -3,6 +3,13 @@ set -e
 
 echo "=== Preparing Rust environment for eBPF development ==="
 
+# Install rustup if not present
+if ! command -v rustup &> /dev/null; then
+    echo "Installing rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
 # Install nightly toolchain (required for eBPF builds)
 echo "Installing nightly toolchain..."
 rustup toolchain install nightly

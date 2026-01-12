@@ -132,10 +132,7 @@ fn run_ebpf_mode(args: Args) -> Result<()> {
     // eBPF requires a Tokio runtime for async operations
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        ebpf_loader::run_ebpf(ebpf_loader::EbpfConfig {
-            pid: args.pid,
-            sample_frequency: args.interval,
-        }).await
+        ebpf_loader::run_ebpf(args.pid, args.interval).await
     })
 }
 

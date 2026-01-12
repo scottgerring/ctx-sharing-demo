@@ -67,7 +67,7 @@ pub struct EbpfConfig {
 }
 
 /// Run the eBPF-based label reader
-pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
+pub async fn run_ebpf(pid: i32, sample_freq: u64) -> Result<()> {
     // Load the eBPF program from the build output path
     // The BPF program must be built first using:
     //   cd ebpf && cargo build --release
@@ -100,15 +100,15 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
     let mut target_pid: HashMap<_, u32, u32> =
         HashMap::try_from(bpf.map_mut("TARGET_PID").context("TARGET_PID map not found")?)?;
     target_pid
-        .insert(0, config.pid as u32, 0)
+        .insert(0, pid as u32, 0)
         .context("Failed to set target PID")?;
-    info!("Configured target PID: {}", config.pid);
+    info!("Configured target PID: {}", pid);
 
     // Calculate and configure kernel structure offsets from BTF
     configure_kernel_offsets(&mut bpf)?;
 
     // Discover TLS symbols and configure maps
-    configure_tls_maps(&mut bpf, config.pid)?;
+    configure_tls_maps(&mut bpf, pid)?;
 
     // Attach to perf events on all CPUs
     let program: &mut PerfEvent = bpf
@@ -118,7 +118,7 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
     program.load().context("Failed to load perf_event program")?;
 
     let num_cpus = num_cpus()?;
-    info!("Attaching to {} CPUs with frequency {}Hz", num_cpus, config.sample_frequency);
+    info!("Attaching to {} CPUs with frequency {}Hz", num_cpus, sample_freq);
 
     // CRITICAL: Must keep Link objects alive! If dropped, perf events detach.
     let mut _links = Vec::new();
@@ -128,7 +128,7 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
                 aya::programs::perf_event::PerfTypeId::Software,
                 aya::programs::perf_event::perf_sw_ids::PERF_COUNT_SW_CPU_CLOCK as u64,
                 aya::programs::perf_event::PerfEventScope::AllProcessesOneCpu { cpu },
-                aya::programs::perf_event::SamplePolicy::Frequency(config.sample_frequency),
+                aya::programs::perf_event::SamplePolicy::Frequency(sample_freq),
                 true, // inherit
             )
             .with_context(|| format!("Failed to attach to CPU {}", cpu))?;
@@ -167,7 +167,7 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
         iteration += 1;
 
         // Check if process still exists
-        if procfs::process::Process::new(config.pid).is_err() {
+        if procfs::process::Process::new(pid).is_err() {
             println!("\nProcess exited!");
             break;
         }
@@ -196,7 +196,7 @@ pub async fn run_ebpf(config: EbpfConfig) -> Result<()> {
                     1 => {
                         let elapsed_ns = event.end_time_ns.saturating_sub(event.start_time_ns);
                         v1_stats.record(elapsed_ns);
-                        let result = process_v1_event(config.pid, event);
+                        let result = process_v1_event(pid, event);
                         v1_results.push(result);
                     }
                     2 => {
