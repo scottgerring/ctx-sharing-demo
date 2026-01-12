@@ -1,5 +1,5 @@
-use std::process::Command;
 use anyhow::{Context, Result};
+use std::process::Command;
 
 fn main() -> Result<()> {
     let task = std::env::args().nth(1);
@@ -31,6 +31,7 @@ fn build_ebpf() -> Result<()> {
         .args(&[
             "+nightly",
             "build",
+            "--release",
             "--manifest-path=ebpf/Cargo.toml",
             "--target=bpfel-unknown-none",
             "-Z",

@@ -16,6 +16,34 @@ pub enum Architecture {
     Aarch64 = 1,
 }
 
+/// Reader mode configuration - controls which readers are enabled.
+/// This is passed to the eBPF program to skip work for disabled readers.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderMode {
+    /// Read both V1 and V2 labels (default)
+    #[default]
+    Both = 0,
+    /// Only read V1 labels
+    V1Only = 1,
+    /// Only read V2 labels
+    V2Only = 2,
+}
+
+impl ReaderMode {
+    /// Returns true if V1 reading is enabled
+    #[inline]
+    pub fn v1_enabled(&self) -> bool {
+        matches!(self, ReaderMode::Both | ReaderMode::V1Only)
+    }
+
+    /// Returns true if V2 reading is enabled
+    #[inline]
+    pub fn v2_enabled(&self) -> bool {
+        matches!(self, ReaderMode::Both | ReaderMode::V2Only)
+    }
+}
+
 /// Get the current architecture at compile time
 #[cfg(target_arch = "x86_64")]
 pub const CURRENT_ARCH: Architecture = Architecture::X86_64;
@@ -208,6 +236,8 @@ unsafe impl aya::Pod for TlsConfig {}
 unsafe impl aya::Pod for LabelEvent {}
 #[cfg(feature = "std")]
 unsafe impl aya::Pod for KernelOffsets {}
+#[cfg(feature = "std")]
+unsafe impl aya::Pod for ReaderMode {}
 
 #[cfg(test)]
 mod tests {

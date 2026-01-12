@@ -32,6 +32,18 @@ enum ReadMode {
     Ebpf,
 }
 
+/// Which label readers to enable (only applies to eBPF mode)
+#[derive(ValueEnum, Clone, Debug, Default)]
+enum ReaderSelection {
+    /// Enable both V1 and V2 readers (default)
+    #[default]
+    Both,
+    /// Only enable V1 reader
+    V1,
+    /// Only enable V2 reader
+    V2,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "context-reader")]
 #[command(about = "Read custom labels from a running process", long_about = None)]
@@ -46,6 +58,12 @@ struct Args {
     /// Reading mode: ptrace (default) or ebpf
     #[arg(long, value_enum, default_value_t = ReadMode::Ptrace)]
     mode: ReadMode,
+
+    /// Which readers to enable: both (default), v1, or v2.
+    /// Only applies to eBPF mode - controls which readers are active in the eBPF program
+    /// to accurately measure overhead of each mode.
+    #[arg(long, value_enum, default_value_t = ReaderSelection::Both)]
+    readers: ReaderSelection,
 
     // Print TLS symbols found in the process and exit
     #[arg(long)]
@@ -125,14 +143,25 @@ fn run(args: Args) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn run_ebpf_mode(args: Args) -> Result<()> {
+    use context_reader_common::ReaderMode;
     use tracing::info;
 
-    info!("Starting eBPF mode with sample frequency {}Hz", args.interval);
+    // Convert CLI reader selection to the common ReaderMode type
+    let reader_mode = match args.readers {
+        ReaderSelection::Both => ReaderMode::Both,
+        ReaderSelection::V1 => ReaderMode::V1Only,
+        ReaderSelection::V2 => ReaderMode::V2Only,
+    };
+
+    info!(
+        "Starting eBPF mode with sample frequency {}Hz, readers={:?}",
+        args.interval, reader_mode
+    );
 
     // eBPF requires a Tokio runtime for async operations
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        ebpf_loader::run_ebpf(args.pid, args.interval).await
+        ebpf_loader::run_ebpf(args.pid, args.interval, reader_mode).await
     })
 }
 

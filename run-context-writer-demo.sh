@@ -3,10 +3,27 @@ set -e
 
 # Parse arguments
 USE_EBPF=false
-if [[ "$1" == "--ebpf" ]]; then
-    USE_EBPF=true
-    echo "Using eBPF mode"
-fi
+READERS=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ebpf)
+            USE_EBPF=true
+            echo "Using eBPF mode"
+            shift
+            ;;
+        --readers)
+            READERS="$2"
+            echo "Using readers: $READERS"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--ebpf] [--readers both|v1|v2]"
+            exit 1
+            ;;
+    esac
+done
 
 # Set logging levels - reduce noise from elf_reader symbol scanning
 export RUST_LOG="warn"
@@ -39,7 +56,11 @@ sleep 5
 # Start context-reader to monitor context-writer
 echo "Starting context-reader to monitor PID $WRITER_PID..."
 if [[ "$USE_EBPF" == "true" ]]; then
-    sudo env RUST_LOG=info ./target/debug/context-reader "$WRITER_PID" --mode ebpf --interval 99
+    READER_ARGS="--mode ebpf --interval 99"
+    if [[ -n "$READERS" ]]; then
+        READER_ARGS="$READER_ARGS --readers $READERS"
+    fi
+    sudo env RUST_LOG=info ./target/debug/context-reader "$WRITER_PID" $READER_ARGS
 else
     sudo ./target/debug/context-reader "$WRITER_PID" --interval 1000
 fi

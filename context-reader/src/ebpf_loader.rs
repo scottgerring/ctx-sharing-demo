@@ -11,7 +11,7 @@ use aya::{
     Ebpf,
 };
 use aya_log::EbpfLogger;
-use context_reader_common::{KernelOffsets, LabelEvent, TlsConfig};
+use context_reader_common::{KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
 use custom_labels::process_context;
 use custom_labels::v2::process_context_ext::TlsConfig as V2TlsConfigExt;
 use std::time::Duration;
@@ -67,7 +67,7 @@ pub struct EbpfConfig {
 }
 
 /// Run the eBPF-based label reader
-pub async fn run_ebpf(pid: i32, sample_freq: u64) -> Result<()> {
+pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode) -> Result<()> {
     // Load the eBPF program from the build output path
     // The BPF program must be built first using:
     //   cd ebpf && cargo build --release
@@ -104,11 +104,19 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64) -> Result<()> {
         .context("Failed to set target PID")?;
     info!("Configured target PID: {}", pid);
 
+    // Configure reader mode
+    let mut reader_mode_map: HashMap<_, u32, u8> =
+        HashMap::try_from(bpf.map_mut("READER_MODE").context("READER_MODE map not found")?)?;
+    reader_mode_map
+        .insert(0, reader_mode as u8, 0)
+        .context("Failed to set reader mode")?;
+    info!("Configured reader mode: {:?}", reader_mode);
+
     // Calculate and configure kernel structure offsets from BTF
     configure_kernel_offsets(&mut bpf)?;
 
-    // Discover TLS symbols and configure maps
-    configure_tls_maps(&mut bpf, pid)?;
+    // Discover TLS symbols and configure maps (only for enabled readers)
+    configure_tls_maps(&mut bpf, pid, reader_mode)?;
 
     // Attach to perf events on all CPUs
     let program: &mut PerfEvent = bpf
@@ -322,51 +330,59 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
 }
 
 /// Configure V1 and V2 TLS maps with discovered symbol locations
-fn configure_tls_maps(bpf: &mut Ebpf, pid: i32) -> Result<()> {
-    // Try to find V1 symbols
-    if let Ok(found) = find_known_symbols_in_process(pid, &[V1_SYMBOL]) {
-        let location = found.tls_location_for(V1_SYMBOL)?;
-        let config = tls_location_to_config(&location.tls_location, 0); // V1 doesn't use fixed-size records
+fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Result<()> {
+    // Try to find V1 symbols (only if V1 reader is enabled)
+    if reader_mode.v1_enabled() {
+        if let Ok(found) = find_known_symbols_in_process(pid, &[V1_SYMBOL]) {
+            let location = found.tls_location_for(V1_SYMBOL)?;
+            let config = tls_location_to_config(&location.tls_location, 0); // V1 doesn't use fixed-size records
 
-        let mut v1_config: HashMap<_, u32, TlsConfig> =
-            HashMap::try_from(bpf.map_mut("V1_TLS_CONFIG").context("V1_TLS_CONFIG map not found")?)?;
-        v1_config
-            .insert(0, config, 0)
-            .context("Failed to set V1 TLS config")?;
+            let mut v1_config: HashMap<_, u32, TlsConfig> =
+                HashMap::try_from(bpf.map_mut("V1_TLS_CONFIG").context("V1_TLS_CONFIG map not found")?)?;
+            v1_config
+                .insert(0, config, 0)
+                .context("Failed to set V1 TLS config")?;
 
-        info!("V1 TLS configured: {:?}", config);
+            info!("V1 TLS configured: {:?}", config);
+        } else {
+            info!("V1 symbols not found in target process");
+        }
     } else {
-        info!("V1 symbols not found in target process");
+        info!("V1 reader disabled by --readers flag");
     }
 
-    // Try to find V2 symbols
-    if let Ok(found) = find_known_symbols_in_process(pid, &[V2_SYMBOL]) {
-        let location = found.tls_location_for(V2_SYMBOL)?;
+    // Try to find V2 symbols (only if V2 reader is enabled)
+    if reader_mode.v2_enabled() {
+        if let Ok(found) = find_known_symbols_in_process(pid, &[V2_SYMBOL]) {
+            let location = found.tls_location_for(V2_SYMBOL)?;
 
-        // Read process context to get V2 max_record_size
-        let max_record_size = match process_context::read_process_context_from_pid(pid) {
-            Ok(proc_ctx) => {
-                V2TlsConfigExt::from_process_context(&proc_ctx)
-                    .map(|cfg| cfg.max_record_size)
-                    .unwrap_or(256) // Default if not found
-            }
-            Err(e) => {
-                warn!("Failed to read V2 process context: {}", e);
-                256 // Default size
-            }
-        };
+            // Read process context to get V2 max_record_size
+            let max_record_size = match process_context::read_process_context_from_pid(pid) {
+                Ok(proc_ctx) => {
+                    V2TlsConfigExt::from_process_context(&proc_ctx)
+                        .map(|cfg| cfg.max_record_size)
+                        .unwrap_or(256) // Default if not found
+                }
+                Err(e) => {
+                    warn!("Failed to read V2 process context: {}", e);
+                    256 // Default size
+                }
+            };
 
-        let config = tls_location_to_config(&location.tls_location, max_record_size);
+            let config = tls_location_to_config(&location.tls_location, max_record_size);
 
-        let mut v2_config: HashMap<_, u32, TlsConfig> =
-            HashMap::try_from(bpf.map_mut("V2_TLS_CONFIG").context("V2_TLS_CONFIG map not found")?)?;
-        v2_config
-            .insert(0, config, 0)
-            .context("Failed to set V2 TLS config")?;
+            let mut v2_config: HashMap<_, u32, TlsConfig> =
+                HashMap::try_from(bpf.map_mut("V2_TLS_CONFIG").context("V2_TLS_CONFIG map not found")?)?;
+            v2_config
+                .insert(0, config, 0)
+                .context("Failed to set V2 TLS config")?;
 
-        info!("V2 TLS configured: {:?}", config);
+            info!("V2 TLS configured: {:?}", config);
+        } else {
+            info!("V2 symbols not found in target process");
+        }
     } else {
-        info!("V2 symbols not found in target process");
+        info!("V2 reader disabled by --readers flag");
     }
 
     Ok(())

@@ -11,7 +11,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::debug;
 use context_reader_common::{
-    calculate_static_tls_address, Architecture, KernelOffsets, LabelEvent, TlsConfig,
+    calculate_static_tls_address, Architecture, KernelOffsets, LabelEvent, ReaderMode, TlsConfig,
     MAX_LABEL_DATA_SIZE,
 };
 
@@ -31,6 +31,11 @@ static V2_TLS_CONFIG: HashMap<u32, TlsConfig> = HashMap::with_max_entries(1, 0);
 /// This provides portability across kernel versions
 #[map]
 static KERNEL_OFFSETS: HashMap<u32, KernelOffsets> = HashMap::with_max_entries(1, 0);
+
+/// Reader mode configuration (set by userspace)
+/// Controls which readers are active to allow accurate overhead measurement
+#[map]
+static READER_MODE: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
 
 /// Ring buffer for sending label events to userspace
 #[map]
@@ -67,19 +72,29 @@ fn try_on_cpu_sample(ctx: &PerfEventContext) -> Result<(), i64> {
 
     debug!(ctx, "on_cpu_sample: pid={} tid={}", pid, tid);
 
+    // Get reader mode configuration (default to Both if not set)
+    let reader_mode = unsafe { READER_MODE.get(&0) }
+        .copied()
+        .unwrap_or(ReaderMode::Both as u8);
+
     // Get thread pointer and architecture from task_struct
     let (thread_pointer, arch) = get_thread_pointer_and_arch()?;
 
-    // Try to read V2 labels
-    if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
-        let _ = read_and_emit_v2(ctx, tid, thread_pointer, config, arch);
+    // Try to read V2 labels (if enabled)
+    // ReaderMode::Both = 0, ReaderMode::V2Only = 2
+    if reader_mode == ReaderMode::Both as u8 || reader_mode == ReaderMode::V2Only as u8 {
+        if let Some(config) = unsafe { V2_TLS_CONFIG.get(&0) } {
+            let _ = read_and_emit_v2(ctx, tid, thread_pointer, config, arch);
+        }
     }
 
-    // Try to read V1 labels
-    if let Some(config) = unsafe { V1_TLS_CONFIG.get(&0) } {
-        let _ = read_and_emit_v1(ctx, tid, thread_pointer, config, arch);
+    // Try to read V1 labels (if enabled)
+    // ReaderMode::Both = 0, ReaderMode::V1Only = 1
+    if reader_mode == ReaderMode::Both as u8 || reader_mode == ReaderMode::V1Only as u8 {
+        if let Some(config) = unsafe { V1_TLS_CONFIG.get(&0) } {
+            let _ = read_and_emit_v1(ctx, tid, thread_pointer, config, arch);
+        }
     }
-
 
     Ok(())
 }
