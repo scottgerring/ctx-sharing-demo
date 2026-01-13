@@ -398,10 +398,18 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
             _pad: [0; 7],
             max_record_size,
         },
-        TlsLocation::SharedLibrary { module_id, offset } => TlsConfig {
+        TlsLocation::SharedLibrary { module_id, offset, .. } => TlsConfig {
             module_id: *module_id as u64,
             offset: *offset as u64,
             is_main_executable: 0,
+            _pad: [0; 7],
+            max_record_size,
+        },
+        TlsLocation::TlsDesc { tls_offset, symbol_offset } => TlsConfig {
+            // For TLSDESC, we don't use DTV - use offset as combined tls_offset + symbol_offset
+            module_id: 0,
+            offset: (*tls_offset + *symbol_offset) as u64,
+            is_main_executable: 1,  // Treat like main executable (direct TP offset)
             _pad: [0; 7],
             max_record_size,
         },

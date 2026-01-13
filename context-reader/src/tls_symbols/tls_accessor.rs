@@ -14,8 +14,16 @@ use super::memory::read_memory;
 pub enum TlsLocation {
     /// TLS in main executable (static offset from thread pointer)
     MainExecutable { offset: usize },
-    /// TLS in shared library (via DTV lookup)
-    SharedLibrary { module_id: usize, offset: usize },
+    /// TLS in shared library (via DTV lookup, with TLSDESC fallback)
+    SharedLibrary {
+        module_id: usize,
+        offset: usize,
+        /// l_tls_offset from link_map - used as fallback for TLSDESC when DTV isn't available
+        tls_offset: usize,
+    },
+    /// TLS via TLSDESC (direct offset from thread pointer, used with dlopen)
+    /// This is used when the library uses TLSDESC and DTV isn't available
+    TlsDesc { tls_offset: usize, symbol_offset: usize },
 }
 
 /// Get the memory address of a TLS variable in a specific thread.
@@ -37,8 +45,12 @@ pub fn get_tls_variable_address_with_thread_pointer(
         TlsLocation::MainExecutable { offset } => {
             get_tls_via_static_offset_with_tp(thread_pointer, *offset)
         }
-        TlsLocation::SharedLibrary { module_id, offset } => {
-            get_tls_via_dtv_with_tp(pid, thread_pointer, *module_id, *offset)
+        TlsLocation::SharedLibrary { module_id, offset, tls_offset } => {
+            // Try DTV first, fall back to TLSDESC if DTV isn't available
+            get_tls_via_dtv_with_fallback(pid, thread_pointer, *module_id, *offset, *tls_offset)
+        }
+        TlsLocation::TlsDesc { tls_offset, symbol_offset } => {
+            get_tls_via_tlsdesc_with_tp(thread_pointer, *tls_offset, *symbol_offset)
         }
     }
 }
@@ -57,6 +69,45 @@ fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -
     Ok(tls_addr as usize)
 }
 
+/// Get TLS address for shared library with DTV lookup and TLSDESC fallback.
+/// First tries DTV lookup, and if that fails (DTV entry is 0 or null),
+/// falls back to TLSDESC-style direct offset calculation.
+fn get_tls_via_dtv_with_fallback(
+    pid: i32,
+    thread_pointer: usize,
+    module_id: usize,
+    symbol_offset: usize,
+    tls_offset: usize,  // l_tls_offset from link_map for TLSDESC fallback
+) -> Result<usize> {
+    // Try DTV lookup first
+    match get_tls_via_dtv_with_tp(pid, thread_pointer, module_id, symbol_offset) {
+        Ok(addr) => Ok(addr),
+        Err(e) => {
+            // DTV lookup failed - try TLSDESC fallback
+            debug!(
+                "DTV lookup failed for module {}: {}. Trying TLSDESC fallback with tls_offset={:#x}",
+                module_id, e, tls_offset
+            );
+
+            // Check if tls_offset is valid for TLSDESC fallback:
+            // - 0 means no TLS offset set
+            // - usize::MAX (0xffffffffffffffff) means "use DTV" (glibc marker for dynamic TLS)
+            // - Very large values (> 1GB) are likely invalid pointers, not offsets
+            const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
+            if tls_offset == 0 || tls_offset == usize::MAX || tls_offset > MAX_REASONABLE_TLS_OFFSET {
+                // No valid tls_offset to fall back to
+                anyhow::bail!(
+                    "DTV lookup failed and tls_offset ({:#x}) is not valid for TLSDESC fallback: {}",
+                    tls_offset, e
+                );
+            }
+
+            // TLSDESC: TLS is at thread_pointer + tls_offset + symbol_offset
+            get_tls_via_tlsdesc_with_tp(thread_pointer, tls_offset, symbol_offset)
+        }
+    }
+}
+
 /// Get TLS address for shared library using DTV (with pre-computed thread pointer).
 fn get_tls_via_dtv_with_tp(
     pid: i32,
@@ -65,18 +116,21 @@ fn get_tls_via_dtv_with_tp(
     tls_offset: usize,
 ) -> Result<usize> {
     // Read the DTV pointer from the thread control block
-    // The DTV is the first member of tcbhead_t on both architectures:
-    // - x86-64: DTV pointer is at thread_pointer + 0 (first word of TCB)
-    // - aarch64: DTV pointer is at thread_pointer + 0 (first word of TCB)
+    // The offset differs by architecture due to different tcbhead_t layouts:
+    //
+    // glibc x86-64 tcbhead_t (sysdeps/x86_64/nptl/tls.h):
+    //   typedef struct { void *tcb; dtv_t *dtv; void *self; ... } tcbhead_t;
+    //   DTV is at offset 8 (second field)
     //
     // glibc aarch64 tcbhead_t (sysdeps/aarch64/nptl/tls.h):
     //   typedef struct { dtv_t *dtv; void *private; } tcbhead_t;
+    //   DTV is at offset 0 (first field)
 
     #[cfg(target_arch = "x86_64")]
-    let dtv_ptr_addr = thread_pointer;
+    let dtv_ptr_addr = thread_pointer + 8;  // DTV is second field in tcbhead_t
 
     #[cfg(target_arch = "aarch64")]
-    let dtv_ptr_addr = thread_pointer;
+    let dtv_ptr_addr = thread_pointer;  // DTV is first field in tcbhead_t
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let dtv_ptr_addr = {
@@ -137,6 +191,47 @@ fn get_tls_via_dtv_with_tp(
     let tls_addr = tls_block + tls_offset;
     debug!("TLS address for module {}: {:#x} (block {:#x} + offset {:#x})",
            module_id, tls_addr, tls_block, tls_offset);
+
+    Ok(tls_addr)
+}
+
+/// Get TLS address using TLSDESC method (direct offset from thread pointer).
+/// This is used for dlopen'd libraries that use TLSDESC.
+///
+/// Architecture differences:
+/// - x86-64: fs_base points to the TCB, TLS grows downward (before TCB)
+///   Formula: thread_pointer - tls_offset + symbol_offset
+/// - aarch64: TPIDR points to TLS block start, TLS grows upward
+///   Formula: thread_pointer + tls_offset + symbol_offset
+fn get_tls_via_tlsdesc_with_tp(
+    thread_pointer: usize,
+    tls_offset: usize,
+    symbol_offset: usize,
+) -> Result<usize> {
+    // For TLSDESC, the TLS is at a direct offset from the thread pointer
+    // tls_offset comes from l_tls_offset in link_map
+    // symbol_offset is the offset of the specific symbol within the TLS block
+
+    #[cfg(target_arch = "x86_64")]
+    let tls_addr = thread_pointer - tls_offset + symbol_offset;
+
+    #[cfg(target_arch = "aarch64")]
+    let tls_addr = thread_pointer + tls_offset + symbol_offset;
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("Unsupported architecture for TLSDESC calculation");
+
+    #[cfg(target_arch = "x86_64")]
+    debug!(
+        "TLSDESC TLS address: {:#x} (tp {:#x} - tls_offset {:#x} + sym_offset {:#x})",
+        tls_addr, thread_pointer, tls_offset, symbol_offset
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    debug!(
+        "TLSDESC TLS address: {:#x} (tp {:#x} + tls_offset {:#x} + sym_offset {:#x})",
+        tls_addr, thread_pointer, tls_offset, symbol_offset
+    );
 
     Ok(tls_addr)
 }

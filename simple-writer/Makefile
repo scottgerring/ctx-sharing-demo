@@ -20,12 +20,15 @@ EXPORT_SYMBOLS = -Wl,--export-dynamic-symbol=custom_labels_abi_version \
 # Build directory
 BUILD_DIR = build
 
-# Source file
-SRC = simple-writer.c
+# Source files
+MAIN_SRC = simple-writer.c
+DLOPEN_SRC = simple-writer-dlopen.c
+PROCESS_CTX_SRC = process_context.c
 
 # All targets
 TARGETS = simple-writer-static-musl simple-writer-static-glibc \
-          simple-writer-dynamic-musl simple-writer-dynamic-glibc
+          simple-writer-dynamic-musl simple-writer-dynamic-glibc \
+          simple-writer-dlopen-glibc
 
 .PHONY: all clean $(TARGETS)
 
@@ -34,37 +37,50 @@ all: $(BUILD_DIR) $(TARGETS)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+# Compile process_context.o for each toolchain
+$(BUILD_DIR)/process_context-musl.o: $(PROCESS_CTX_SRC) | $(BUILD_DIR)
+	musl-gcc $(COMMON_CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/process_context-glibc.o: $(PROCESS_CTX_SRC) | $(BUILD_DIR)
+	gcc $(COMMON_CFLAGS) -c -o $@ $<
+
 # Variant 1: Static labels + musl (fully static binary)
-simple-writer-static-musl: $(BUILD_DIR)
+simple-writer-static-musl: $(BUILD_DIR)/process_context-musl.o
 	musl-gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-static \
-		-o $(BUILD_DIR)/$@ $(SRC) \
+		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-musl.o \
 		../custom-labels/libcustomlabels.a \
 		$(EXPORT_SYMBOLS)
 
 # Variant 2: Static labels + glibc (dynamically linked glibc, static custom-labels)
-simple-writer-static-glibc: $(BUILD_DIR)
+simple-writer-static-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
-		-o $(BUILD_DIR)/$@ $(SRC) \
+		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-glibc.o \
 		../custom-labels/libcustomlabels.a \
 		$(EXPORT_SYMBOLS)
 
 # Variant 3: Dynamic labels + musl (static musl, dynamic custom-labels)
-simple-writer-dynamic-musl: $(BUILD_DIR)
+simple-writer-dynamic-musl: $(BUILD_DIR)/process_context-musl.o
 	musl-gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-static \
-		-o $(BUILD_DIR)/$@ $(SRC) \
+		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-musl.o \
 		-L../custom-labels -lcustomlabels \
 		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
 		$(EXPORT_SYMBOLS)
 
 # Variant 4: Dynamic labels + glibc (fully dynamic)
-simple-writer-dynamic-glibc: $(BUILD_DIR)
+simple-writer-dynamic-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
-		-o $(BUILD_DIR)/$@ $(SRC) \
+		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-glibc.o \
 		-L../custom-labels -lcustomlabels \
 		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
 		$(EXPORT_SYMBOLS)
+
+# Variant 5: dlopen + glibc (load library at runtime with dlopen)
+simple-writer-dlopen-glibc: $(BUILD_DIR)/process_context-glibc.o
+	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
+		-o $(BUILD_DIR)/$@ $(DLOPEN_SRC) $(BUILD_DIR)/process_context-glibc.o \
+		-ldl -lpthread
 
 clean:
 	rm -rf $(BUILD_DIR)

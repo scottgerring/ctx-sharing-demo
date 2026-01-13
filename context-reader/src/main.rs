@@ -76,6 +76,14 @@ struct Args {
     // Include internal symbols from symtab (default: only show exported symbols from dynsym)
     #[arg(long, requires = "print_tls")]
     include_symtab: bool,
+
+    /// Validate mode: read TLS once successfully and exit with 0, or exit with 1 on timeout
+    #[arg(long)]
+    validate_only: bool,
+
+    /// Timeout in seconds for --validate-only mode (default: 10)
+    #[arg(long, default_value = "10")]
+    timeout: u64,
 }
 
 fn main() -> Result<()> {
@@ -169,7 +177,7 @@ fn run_ebpf_mode(args: Args) -> Result<()> {
 fn run_ptrace_mode(args: Args) -> Result<()> {
     use nix::sys::ptrace;
     use nix::unistd::Pid;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
     use tls_symbols::tls_accessor;
     use tracing::{debug, info};
@@ -204,6 +212,8 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
     info!("Initialized {} TLS reader(s)", readers.len());
 
     let interval = Duration::from_millis(args.interval);
+    let timeout_duration = Duration::from_secs(args.timeout);
+    let start_time = Instant::now();
     let mut iteration = 0u64;
     let mut empty_iterations = 0u32;
     const MAX_EMPTY_ITERATIONS: u32 = 5;
@@ -211,8 +221,18 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
     loop {
         iteration += 1;
 
+        // Check timeout in validate-only mode
+        if args.validate_only && start_time.elapsed() > timeout_duration {
+            eprintln!("VALIDATE FAILED: Timeout after {}s - no labels found", args.timeout);
+            std::process::exit(1);
+        }
+
         // Check if process still exists
         if procfs::process::Process::new(args.pid).is_err() {
+            if args.validate_only {
+                eprintln!("VALIDATE FAILED: Process exited before labels were found");
+                std::process::exit(1);
+            }
             println!("\nProcess exited! finishing up.");
             break;
         }
@@ -267,6 +287,7 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
         }
 
         let mut any_labels_found = false;
+        let mut found_labels_summary: Option<String> = None;
 
         // Now call each reader for each thread (no ptrace needed)
         for reader in &readers {
@@ -277,8 +298,16 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
             // Process successful thread contexts
             for ctx in &thread_contexts {
                 let result = reader.read_thread(args.pid, ctx);
-                if matches!(result, ThreadResult::Found { .. }) {
+                if let ThreadResult::Found { tid, labels, .. } = &result {
                     any_labels_found = true;
+                    if found_labels_summary.is_none() {
+                        found_labels_summary = Some(format!(
+                            "[{}] thread={}, labels=[{}]",
+                            reader.name(),
+                            tid,
+                            labels.iter().map(|l| format!("{}={}", l.key, l.value)).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
                 }
                 results.push(result);
             }
@@ -291,12 +320,22 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
                 });
             }
 
-            output::print_iteration(iteration, reader.name(), &results);
+            if !args.validate_only {
+                output::print_iteration(iteration, reader.name(), &results);
+            }
+        }
+
+        // In validate-only mode, exit successfully on first labels found
+        if args.validate_only && any_labels_found {
+            if let Some(summary) = found_labels_summary {
+                println!("VALIDATE OK: {}", summary);
+            }
+            std::process::exit(0);
         }
 
         if !any_labels_found {
             empty_iterations += 1;
-            if empty_iterations >= MAX_EMPTY_ITERATIONS {
+            if !args.validate_only && empty_iterations >= MAX_EMPTY_ITERATIONS {
                 println!("\nNo labels found for {} consecutive iterations, process appears to be shutting down. Exiting.", MAX_EMPTY_ITERATIONS);
                 break;
             }

@@ -4,6 +4,7 @@ set -e
 # Default values
 CLIB="glibc"
 LABELS="dynamic"
+VALIDATE_MODE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -18,22 +19,224 @@ while [[ $# -gt 0 ]]; do
             ;;
         --labels)
             LABELS="$2"
-            if [[ "$LABELS" != "static" && "$LABELS" != "dynamic" ]]; then
-                echo "ERROR: --labels must be 'static' or 'dynamic'"
+            if [[ "$LABELS" != "static" && "$LABELS" != "dynamic" && "$LABELS" != "dlopen" ]]; then
+                echo "ERROR: --labels must be 'static', 'dynamic', or 'dlopen'"
                 exit 1
             fi
             shift 2
             ;;
+        --validate)
+            VALIDATE_MODE="single"
+            shift
+            ;;
+        --validate-all)
+            VALIDATE_MODE="all"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic]"
+            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic|dlopen] [--validate] [--validate-all]"
+            echo ""
+            echo "Options:"
+            echo "  --clib        C library to use: musl or glibc (default: glibc)"
+            echo "  --labels      Labels linking: static, dynamic, or dlopen (default: dynamic)"
+            echo "  --validate    Run in validation mode (exit after first successful read)"
+            echo "  --validate-all  Run all variant combinations in validation mode"
             exit 1
             ;;
     esac
 done
 
-# Construct binary name
-BINARY="simple-writer-${LABELS}-${CLIB}"
+# Function to run a single variant
+run_variant() {
+    local labels=$1
+    local clib=$2
+    local validate=$3
+
+    # Check for invalid combinations
+    if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
+        echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
+        return 1
+    fi
+
+    # Set binary name
+    if [[ "$labels" == "dlopen" ]]; then
+        binary="simple-writer-dlopen-glibc"
+    else
+        binary="simple-writer-${labels}-${clib}"
+    fi
+
+    echo "========================================"
+    echo "Testing: $binary"
+    echo "Configuration: custom-labels=${labels}, libc=${clib}"
+    echo "========================================"
+
+    # Set logging levels - reduce noise
+    export RUST_LOG="warn"
+
+    # Step 1: Build custom-labels library
+    echo "Building custom-labels library..."
+    cd custom-labels
+
+    if [[ "$labels" == "static" ]]; then
+        make libcustomlabels.a >/dev/null 2>&1
+    else
+        make libcustomlabels.so >/dev/null 2>&1
+    fi
+
+    cd ..
+
+    # Step 2: Build simple-writer
+    echo "Building simple-writer variant..."
+    cd simple-writer
+    make "$binary" >/dev/null 2>&1
+    cd ..
+
+    # Step 3: Verify binary exists
+    binary_path="simple-writer/build/$binary"
+    if [[ ! -f "$binary_path" ]]; then
+        echo "ERROR: Binary not found at $binary_path"
+        return 1
+    fi
+
+    # Step 4: Build context-reader (only once)
+    if [[ ! -f "context-reader/target/debug/context-reader" ]]; then
+        echo "Building context-reader..."
+        cd context-reader
+        cargo build >/dev/null 2>&1
+        cd ..
+    fi
+
+    # Step 5: Start simple-writer
+    echo "Starting simple-writer..."
+    "$binary_path" &
+    writer_pid=$!
+
+    # Give simple-writer a moment to initialize
+    sleep 2
+
+    # Check if process is still running
+    if ! kill -0 "$writer_pid" 2>/dev/null; then
+        echo "ERROR: simple-writer exited prematurely"
+        return 1
+    fi
+
+    # Step 6: Run context-reader
+    local result=0
+    if [[ "$validate" == "yes" ]]; then
+        echo "Running context-reader in validate mode..."
+        if sudo env RUST_LOG=warn ./context-reader/target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15; then
+            echo "PASS: $binary"
+            result=0
+        else
+            echo "FAIL: $binary"
+            result=1
+        fi
+    else
+        echo "Starting context-reader to monitor PID $writer_pid..."
+        sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$writer_pid" --interval 1000
+        result=$?
+    fi
+
+    # Cleanup
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+
+    echo ""
+    return $result
+}
+
+# Validate-all mode: test all combinations
+if [[ "$VALIDATE_MODE" == "all" ]]; then
+    echo "Running validation for all simple-writer variants..."
+    echo ""
+
+    # Clean build directories to ensure fresh builds for each variant
+    echo "Cleaning build directories..."
+    rm -rf simple-writer/build
+    mkdir -p simple-writer/build
+    cd custom-labels && make clean >/dev/null 2>&1 && cd ..
+    echo ""
+
+    # Build context-reader once upfront
+    echo "Building context-reader..."
+    cd context-reader
+    cargo build 2>&1 | grep -E "Compiling|Finished|error" || true
+    cd ..
+    echo ""
+
+    # Track results
+    passed=0
+    failed=0
+    results=""
+
+    # Test all combinations
+    for labels in static dynamic dlopen; do
+        for clib in glibc musl; do
+            # Skip invalid combinations
+            if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
+                continue
+            fi
+
+            # Clean and rebuild for this combination
+            cd custom-labels && make clean >/dev/null 2>&1 && cd ..
+
+            if run_variant "$labels" "$clib" "yes"; then
+                passed=$((passed + 1))
+                if [[ "$labels" == "dlopen" ]]; then
+                    results="${results}PASS: simple-writer-dlopen-glibc\n"
+                else
+                    results="${results}PASS: simple-writer-${labels}-${clib}\n"
+                fi
+            else
+                failed=$((failed + 1))
+                if [[ "$labels" == "dlopen" ]]; then
+                    results="${results}FAIL: simple-writer-dlopen-glibc\n"
+                else
+                    results="${results}FAIL: simple-writer-${labels}-${clib}\n"
+                fi
+            fi
+        done
+    done
+
+    # Print summary
+    echo "========================================"
+    echo "VALIDATION SUMMARY"
+    echo "========================================"
+    echo -e "$results"
+    echo "Passed: $passed"
+    echo "Failed: $failed"
+    echo ""
+
+    if [[ $failed -gt 0 ]]; then
+        echo "OVERALL: FAILED"
+        exit 1
+    else
+        echo "OVERALL: PASSED"
+        exit 0
+    fi
+fi
+
+# Single variant mode
+if [[ "$VALIDATE_MODE" == "single" ]]; then
+    run_variant "$LABELS" "$CLIB" "yes"
+    exit $?
+fi
+
+# Normal interactive mode
+# Check for invalid combinations
+if [[ "$LABELS" == "dynamic" && "$CLIB" == "musl" ]]; then
+    echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
+    exit 1
+fi
+
+# Set binary name
+if [[ "$LABELS" == "dlopen" ]]; then
+    BINARY="simple-writer-dlopen-glibc"
+else
+    BINARY="simple-writer-${LABELS}-${CLIB}"
+fi
+
 echo "Building and running: $BINARY"
 echo "Configuration: custom-labels=${LABELS}, libc=${CLIB}"
 echo ""
@@ -49,6 +252,7 @@ if [[ "$LABELS" == "static" ]]; then
     echo "  Building static library (libcustomlabels.a)..."
     make libcustomlabels.a
 else
+    # Both dynamic and dlopen variants need the shared library
     echo "  Building shared library (libcustomlabels.so)..."
     make libcustomlabels.so
 fi
