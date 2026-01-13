@@ -39,6 +39,8 @@ provision:
         linux-tools-common \
         linux-tools-generic \
         bpftool \
+        musl-dev \
+        musl-tools \
         curl \
         git
 

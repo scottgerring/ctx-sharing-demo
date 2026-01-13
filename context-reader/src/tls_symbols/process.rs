@@ -159,12 +159,29 @@ impl FoundSymbols {
             info!("Resolving module ID for shared library: {:?}", self.path);
             let module_id = dynamic_linker::resolve_module_id(self.pid, &self.path)
                 .context("Failed to resolve module ID for shared library")?;
-            let offset = symbol.st_value as usize;
-            info!(
-                "Using DTV lookup: module_id={}, offset={:#x}",
-                module_id, offset
-            );
-            TlsLocation::SharedLibrary { module_id, offset }
+
+            if module_id == 0 {
+                // module_id == 0 means this library's TLS is in static TLS space
+                // (allocated at program startup), not in the DTV
+                let st_value = symbol.st_value as u64;
+                let offset = context_reader_common::calculate_static_tls_offset(
+                    st_value,
+                    self.symbol_info.tls_block_size.map(|s| s as u64),
+                    context_reader_common::CURRENT_ARCH,
+                ) as usize;
+                info!(
+                    "Using static TLS offset for shared library with module_id=0: st_value={:#x}, tls_block_size={:?}, offset={:#x}",
+                    st_value, self.symbol_info.tls_block_size, offset
+                );
+                TlsLocation::MainExecutable { offset }
+            } else {
+                let offset = symbol.st_value as usize;
+                info!(
+                    "Using DTV lookup: module_id={}, offset={:#x}",
+                    module_id, offset
+                );
+                TlsLocation::SharedLibrary { module_id, offset }
+            }
         };
 
         Ok(LoadedTlsSymbol {
