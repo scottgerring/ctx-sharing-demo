@@ -162,14 +162,16 @@ fn run_ebpf_mode(args: Args) -> Result<()> {
     };
 
     info!(
-        "Starting eBPF mode with sample frequency {}Hz, readers={:?}",
-        args.interval, reader_mode
+        "Starting eBPF mode with sample frequency {}Hz, readers={:?}{}",
+        args.interval,
+        reader_mode,
+        if args.validate_only { format!(", validate_only (timeout={}s)", args.timeout) } else { String::new() }
     );
 
     // eBPF requires a Tokio runtime for async operations
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        ebpf_loader::run_ebpf(args.pid, args.interval, reader_mode).await
+        ebpf_loader::run_ebpf(args.pid, args.interval, reader_mode, args.validate_only, args.timeout).await
     })
 }
 

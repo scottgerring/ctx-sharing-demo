@@ -67,7 +67,7 @@ pub struct EbpfConfig {
 }
 
 /// Run the eBPF-based label reader
-pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode) -> Result<()> {
+pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, validate_only: bool, timeout_secs: u64) -> Result<()> {
     // Load the eBPF program from the build output path
     // The BPF program must be built first using:
     //   cd ebpf && cargo build --release
@@ -157,6 +157,8 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode) -> Re
     let mut v2_stats = FormatStats::new();
 
     let mut shutdown = false;
+    let start_time = std::time::Instant::now();
+    let timeout_duration = Duration::from_secs(timeout_secs);
 
     loop {
         // Check for Ctrl-C signal
@@ -174,8 +176,18 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode) -> Re
 
         iteration += 1;
 
+        // Check timeout in validate-only mode
+        if validate_only && start_time.elapsed() > timeout_duration {
+            eprintln!("VALIDATE FAILED: Timeout after {}s - no labels found", timeout_secs);
+            std::process::exit(1);
+        }
+
         // Check if process still exists
         if procfs::process::Process::new(pid).is_err() {
+            if validate_only {
+                eprintln!("VALIDATE FAILED: Process exited before labels were found");
+                std::process::exit(1);
+            }
             println!("\nProcess exited!");
             break;
         }
@@ -222,12 +234,45 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode) -> Re
             }
         }
 
-        // Print results if we got any
-        if !v1_results.is_empty() {
-            output::print_iteration(iteration, "v1-ebpf", &v1_results);
+        // Check for labels found (for validate-only mode)
+        let mut any_labels_found = false;
+        let mut found_labels_summary: Option<String> = None;
+
+        for result in v1_results.iter().chain(v2_results.iter()) {
+            if let ThreadResult::Found { tid, labels } = result {
+                any_labels_found = true;
+                if found_labels_summary.is_none() {
+                    let reader_name = if v1_results.iter().any(|r| matches!(r, ThreadResult::Found { tid: t, .. } if t == tid)) {
+                        "v1-ebpf"
+                    } else {
+                        "v2-ebpf"
+                    };
+                    found_labels_summary = Some(format!(
+                        "[{}] thread={}, labels=[{}]",
+                        reader_name,
+                        tid,
+                        labels.iter().map(|l| format!("{}={}", l.key, l.value)).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
         }
-        if !v2_results.is_empty() {
-            output::print_iteration(iteration, "v2-ebpf", &v2_results);
+
+        // In validate-only mode, exit successfully on first labels found
+        if validate_only && any_labels_found {
+            if let Some(summary) = found_labels_summary {
+                println!("VALIDATE OK: {}", summary);
+            }
+            std::process::exit(0);
+        }
+
+        // Print results if we got any (unless in validate-only mode)
+        if !validate_only {
+            if !v1_results.is_empty() {
+                output::print_iteration(iteration, "v1-ebpf", &v1_results);
+            }
+            if !v2_results.is_empty() {
+                output::print_iteration(iteration, "v2-ebpf", &v2_results);
+            }
         }
     }
 

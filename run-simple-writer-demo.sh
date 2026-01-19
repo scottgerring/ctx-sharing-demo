@@ -5,6 +5,7 @@ set -e
 CLIB="glibc"
 LABELS="dynamic"
 VALIDATE_MODE=""
+USE_EBPF=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -33,15 +34,20 @@ while [[ $# -gt 0 ]]; do
             VALIDATE_MODE="all"
             shift
             ;;
+        --ebpf)
+            USE_EBPF="yes"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic|dlopen] [--validate] [--validate-all]"
+            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic|dlopen] [--validate] [--validate-all] [--ebpf]"
             echo ""
             echo "Options:"
             echo "  --clib        C library to use: musl or glibc (default: glibc)"
             echo "  --labels      Labels linking: static, dynamic, or dlopen (default: dynamic)"
             echo "  --validate    Run in validation mode (exit after first successful read)"
             echo "  --validate-all  Run all variant combinations in validation mode"
+            echo "  --ebpf        Use eBPF mode instead of ptrace"
             exit 1
             ;;
     esac
@@ -52,6 +58,7 @@ run_variant() {
     local labels=$1
     local clib=$2
     local validate=$3
+    local use_ebpf=$4
 
     # Check for invalid combinations
     if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
@@ -100,11 +107,21 @@ run_variant() {
     fi
 
     # Step 4: Build context-reader (only once)
-    if [[ ! -f "context-reader/target/debug/context-reader" ]]; then
-        echo "Building context-reader..."
-        cd context-reader
-        cargo build >/dev/null 2>&1
-        cd ..
+    if [[ "$use_ebpf" == "yes" ]]; then
+        # eBPF mode requires full build including eBPF program
+        if [[ ! -f "context-reader/ebpf/target/bpfel-unknown-none/release/context-reader-ebpf" ]]; then
+            echo "Building context-reader with eBPF support..."
+            cd context-reader
+            cargo xtask build >/dev/null 2>&1
+            cd ..
+        fi
+    else
+        if [[ ! -f "context-reader/target/debug/context-reader" ]]; then
+            echo "Building context-reader..."
+            cd context-reader
+            cargo build >/dev/null 2>&1
+            cd ..
+        fi
     fi
 
     # Step 5: Start simple-writer
@@ -123,9 +140,14 @@ run_variant() {
 
     # Step 6: Run context-reader
     local result=0
+    local mode_flag=""
+    if [[ "$use_ebpf" == "yes" ]]; then
+        mode_flag="--mode ebpf"
+    fi
+
     if [[ "$validate" == "yes" ]]; then
-        echo "Running context-reader in validate mode..."
-        if sudo env RUST_LOG=warn ./context-reader/target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15; then
+        echo "Running context-reader in validate mode${use_ebpf:+ (eBPF)}..."
+        if sudo env RUST_LOG=warn ./context-reader/target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
             echo "PASS: $binary"
             result=0
         else
@@ -133,8 +155,8 @@ run_variant() {
             result=1
         fi
     else
-        echo "Starting context-reader to monitor PID $writer_pid..."
-        sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$writer_pid" --interval 1000
+        echo "Starting context-reader to monitor PID $writer_pid${use_ebpf:+ (eBPF)}..."
+        sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$writer_pid" --interval 1000 $mode_flag
         result=$?
     fi
 
@@ -159,9 +181,13 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
     echo ""
 
     # Build context-reader once upfront
-    echo "Building context-reader..."
+    echo "Building context-reader${USE_EBPF:+ with eBPF support}..."
     cd context-reader
-    cargo build 2>&1 | grep -E "Compiling|Finished|error" || true
+    if [[ "$USE_EBPF" == "yes" ]]; then
+        cargo xtask build 2>&1 | grep -E "Compiling|Finished|error" || true
+    else
+        cargo build 2>&1 | grep -E "Compiling|Finished|error" || true
+    fi
     cd ..
     echo ""
 
@@ -181,7 +207,7 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
             # Clean and rebuild for this combination
             cd custom-labels && make clean >/dev/null 2>&1 && cd ..
 
-            if run_variant "$labels" "$clib" "yes"; then
+            if run_variant "$labels" "$clib" "yes" "$USE_EBPF"; then
                 passed=$((passed + 1))
                 if [[ "$labels" == "dlopen" ]]; then
                     results="${results}PASS: simple-writer-dlopen-glibc\n"
@@ -219,7 +245,7 @@ fi
 
 # Single variant mode
 if [[ "$VALIDATE_MODE" == "single" ]]; then
-    run_variant "$LABELS" "$CLIB" "yes"
+    run_variant "$LABELS" "$CLIB" "yes" "$USE_EBPF"
     exit $?
 fi
 
@@ -296,9 +322,13 @@ fi
 echo ""
 
 # Step 4: Build context-reader
-echo "Step 4: Building context-reader..."
+echo "Step 4: Building context-reader${USE_EBPF:+ with eBPF support}..."
 cd context-reader
-cargo build
+if [[ "$USE_EBPF" == "yes" ]]; then
+    cargo xtask build
+else
+    cargo build
+fi
 cd ..
 echo ""
 
@@ -315,5 +345,11 @@ sleep 2
 echo ""
 
 # Step 6: Run context-reader
-echo "Step 6: Starting context-reader to monitor PID $WRITER_PID..."
-sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$WRITER_PID" --interval 1000
+MODE_FLAG=""
+if [[ "$USE_EBPF" == "yes" ]]; then
+    MODE_FLAG="--mode ebpf"
+fi
+echo "Step 6: Starting context-reader to monitor PID $WRITER_PID${USE_EBPF:+ (eBPF mode)}..."
+cd context-reader
+sudo env RUST_LOG=debug target/debug/context-reader "$WRITER_PID" --interval 1000 $MODE_FLAG
+cd ..
