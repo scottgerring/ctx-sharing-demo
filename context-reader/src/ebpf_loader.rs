@@ -452,8 +452,9 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
             _pad: [0; 6],
             max_record_size,
         },
-        TlsLocation::SharedLibrary { module_id, offset, tls_offset } => {
+        TlsLocation::SharedLibrary { module_id, offset, tls_offset, .. } => {
             // Determine if eBPF should use static TLS based on tls_offset validity
+            // Note: tlsdesc could also be used here - once resolved it's just another static offset
             let use_static = is_valid_static_tls_offset(*tls_offset);
             TlsConfig {
                 module_id: *module_id as u64,

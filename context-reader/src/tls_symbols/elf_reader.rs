@@ -1,9 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use goblin::elf::{Elf, Sym};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::debug;
+
+// TLSDESC relocation types by architecture
+#[cfg(target_arch = "x86_64")]
+const R_TLS_DESC: u32 = 36; // R_X86_64_TLSDESC
+
+#[cfg(target_arch = "aarch64")]
+const R_TLS_DESC: u32 = 1031; // R_AARCH64_TLSDESC
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const R_TLS_DESC: u32 = 0; // Unsupported
 
 /// Information about a symbol and where it was found
 #[derive(Debug, Clone)]
@@ -169,4 +179,123 @@ mod test {
         println!("Successfully found LOCAL TLS symbols from regular symbol table");
         Ok(())
     }
+}
+
+/// Information about a TLSDESC relocation for a TLS symbol
+#[derive(Debug, Clone)]
+pub struct TlsDescRelocation {
+    /// Address in GOT where the TLSDESC entry is stored (file offset, not runtime address)
+    pub got_offset: usize,
+    /// Symbol index this relocation refers to
+    pub symbol_index: usize,
+    /// Addend for the relocation (usually the symbol's TLS offset)
+    pub addend: i64,
+}
+
+/// Find TLSDESC relocation for a specific TLS symbol in an ELF binary.
+///
+/// TLSDESC (TLS Descriptor) is a TLS access model where:
+/// - The GOT contains a descriptor: {resolver_function, argument}
+/// - For statically-linked TLS, the argument is the offset from thread pointer
+/// - For dynamically-linked TLS (dlopen), the resolver allocates TLS on first access
+///
+/// This function finds the GOT entry offset for a given symbol so we can read
+/// the resolved descriptor from the target process at runtime.
+pub fn find_tlsdesc_relocation(path: &Path, symbol_name: &str) -> Result<Option<TlsDescRelocation>> {
+    let buffer = fs::read(path).context("Failed to read binary")?;
+    let elf = Elf::parse(&buffer).context("Failed to parse ELF")?;
+
+    // First, find the symbol index for our symbol in dynsyms
+    let symbol_index = elf.dynsyms.iter()
+        .position(|sym| {
+            elf.dynstrtab.get_at(sym.st_name)
+                .map(|name| name == symbol_name)
+                .unwrap_or(false)
+        });
+
+    let symbol_index = match symbol_index {
+        Some(idx) => idx,
+        None => {
+            debug!("Symbol {} not found in dynsyms, cannot find TLSDESC relocation", symbol_name);
+            return Ok(None);
+        }
+    };
+
+    debug!("Looking for TLSDESC relocation for symbol {} (dynsym index {})",
+           symbol_name, symbol_index);
+
+    // Search through all relocation sections
+    // goblin provides pltrelocs and dynrels
+
+    // Check PLT relocations (used by some TLSDESC implementations)
+    for reloc in elf.pltrelocs.iter() {
+        if reloc.r_type == R_TLS_DESC && reloc.r_sym == symbol_index {
+            debug!("Found TLSDESC in PLT relocs: offset={:#x}, sym={}, addend={}",
+                   reloc.r_offset, reloc.r_sym, reloc.r_addend.unwrap_or(0));
+            return Ok(Some(TlsDescRelocation {
+                got_offset: reloc.r_offset as usize,
+                symbol_index: reloc.r_sym,
+                addend: reloc.r_addend.unwrap_or(0),
+            }));
+        }
+    }
+
+    // Check dynamic relocations
+    for reloc in elf.dynrels.iter() {
+        if reloc.r_type == R_TLS_DESC && reloc.r_sym == symbol_index {
+            debug!("Found TLSDESC in dynamic relocs: offset={:#x}, sym={}, addend={}",
+                   reloc.r_offset, reloc.r_sym, reloc.r_addend.unwrap_or(0));
+            return Ok(Some(TlsDescRelocation {
+                got_offset: reloc.r_offset as usize,
+                symbol_index: reloc.r_sym,
+                addend: reloc.r_addend.unwrap_or(0),
+            }));
+        }
+    }
+
+    // Also check shdr_relocs if available
+    for (_, relocs) in elf.shdr_relocs.iter() {
+        for reloc in relocs.iter() {
+            if reloc.r_type == R_TLS_DESC && reloc.r_sym == symbol_index {
+                debug!("Found TLSDESC in section relocs: offset={:#x}, sym={}, addend={}",
+                       reloc.r_offset, reloc.r_sym, reloc.r_addend.unwrap_or(0));
+                return Ok(Some(TlsDescRelocation {
+                    got_offset: reloc.r_offset as usize,
+                    symbol_index: reloc.r_sym,
+                    addend: reloc.r_addend.unwrap_or(0),
+                }));
+            }
+        }
+    }
+
+    debug!("No TLSDESC relocation found for symbol {}", symbol_name);
+    Ok(None)
+}
+
+/// Find the base address where a library is loaded in a target process.
+/// This is needed to convert file offsets (like GOT entry offsets) to runtime addresses.
+#[cfg(target_os = "linux")]
+pub fn find_library_base_address(pid: i32, library_path: &Path) -> Result<usize> {
+    use procfs::process::{MMapPath, Process};
+
+    let proc = Process::new(pid).context("Failed to open process")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
+
+    let lib_filename = library_path.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("Invalid library path"))?;
+
+    // Find the first mapping for this library (should be the base)
+    for map in maps.iter() {
+        if let MMapPath::Path(ref path) = map.pathname {
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if filename == lib_filename || path == library_path {
+                    debug!("Found {} loaded at base {:#x}", lib_filename, map.address.0);
+                    return Ok(map.address.0 as usize);
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("Library {} not found in process maps", lib_filename))
 }

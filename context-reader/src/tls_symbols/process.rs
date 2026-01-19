@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use tracing::{debug, info};
 
 use super::dynamic_linker;
-use super::elf_reader::SymbolInfo;
-use super::tls_accessor::TlsLocation;
+use super::elf_reader::{find_tlsdesc_relocation, SymbolInfo};
+use super::tls_accessor::{TlsDescInfo, TlsLocation};
 
 /// Information about a TLS symbol found in a loaded binary (executable or shared library)
 #[derive(Debug, Clone)]
@@ -176,14 +176,39 @@ impl FoundSymbols {
                 TlsLocation::MainExecutable { offset }
             } else {
                 let offset = symbol.st_value as usize;
+
+                // Try to find TLSDESC relocation for this symbol
+                let tlsdesc = match find_tlsdesc_relocation(&self.path, symbol_name) {
+                    Ok(Some(reloc)) => {
+                        info!(
+                            "Found TLSDESC relocation for {}: got_offset={:#x}",
+                            symbol_name, reloc.got_offset
+                        );
+                        Some(TlsDescInfo {
+                            library_path: self.path.clone(),
+                            got_offset: reloc.got_offset,
+                            symbol_name: symbol_name.to_string(),
+                        })
+                    }
+                    Ok(None) => {
+                        debug!("No TLSDESC relocation found for {} in {:?}", symbol_name, self.path);
+                        None
+                    }
+                    Err(e) => {
+                        debug!("Error looking up TLSDESC relocation for {}: {}", symbol_name, e);
+                        None
+                    }
+                };
+
                 info!(
-                    "Using static TLS first, DTV fallback: module_id={}, offset={:#x}, tls_offset={:#x}",
-                    tls_info.module_id, offset, tls_info.tls_offset
+                    "Using resolution order static → TLSDESC → DTV: module_id={}, offset={:#x}, tls_offset={:#x}, has_tlsdesc={}",
+                    tls_info.module_id, offset, tls_info.tls_offset, tlsdesc.is_some()
                 );
                 TlsLocation::SharedLibrary {
                     module_id: tls_info.module_id,
                     offset,
                     tls_offset: tls_info.tls_offset,
+                    tlsdesc,
                 }
             }
         };
