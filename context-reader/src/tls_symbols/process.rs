@@ -177,7 +177,7 @@ impl FoundSymbols {
             } else {
                 let offset = symbol.st_value as usize;
                 info!(
-                    "Using DTV lookup with TLSDESC fallback: module_id={}, offset={:#x}, tls_offset={:#x}",
+                    "Using static TLS first, DTV fallback: module_id={}, offset={:#x}, tls_offset={:#x}",
                     tls_info.module_id, offset, tls_info.tls_offset
                 );
                 TlsLocation::SharedLibrary {

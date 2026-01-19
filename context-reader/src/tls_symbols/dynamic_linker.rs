@@ -18,7 +18,7 @@ pub struct LoadedLibrary {
     pub base_address: usize,
     /// TLS module ID assigned by the dynamic linker
     pub module_id: usize,
-    /// TLS offset from thread pointer (for TLSDESC / static TLS calculation)
+    /// TLS offset from thread pointer (l_tls_offset for static TLS calculation)
     pub tls_offset: usize,
 }
 
@@ -115,7 +115,7 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         // Read the actual l_tls_modid from the link_map structure
         let tls_modid = read_tls_modid(pid, current_addr)?;
 
-        // Read l_tls_offset (used for TLSDESC / direct TP offset calculation)
+        // Read l_tls_offset (used for static TLS calculation)
         let tls_offset = read_tls_offset(pid, current_addr)?;
 
         // Read the library name
@@ -169,7 +169,7 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
 ///
 /// The glibc link_map structure contains TLS-related fields:
 /// - l_tls_modid: Module ID for DTV indexing
-/// - l_tls_offset: Offset from thread pointer (used with TLSDESC)
+/// - l_tls_offset: Offset from thread pointer (used for static TLS calculation)
 ///
 /// The offsets were determined from glibc's _thread_db_link_map_l_tls_* symbols:
 /// - l_tls_offset: offset 1168 (0x490)
@@ -205,7 +205,7 @@ fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
 }
 
 /// Read l_tls_offset from link_map structure.
-/// This is the offset from thread pointer used with TLSDESC.
+/// This is the offset from thread pointer used for static TLS calculation.
 fn read_tls_offset(pid: i32, link_map_addr: usize) -> Result<usize> {
     // Offset from _thread_db_link_map_l_tls_offset
     // These offsets vary by architecture (determined via GDB inspection of the symbol)

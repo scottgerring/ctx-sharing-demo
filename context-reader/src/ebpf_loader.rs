@@ -433,29 +433,46 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
     Ok(())
 }
 
+/// Check if a tls_offset value is valid for static TLS calculation.
+/// This mirrors the check in tls_accessor.rs.
+fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
+    const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
+    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
+}
+
 /// Convert TlsLocation to TlsConfig for BPF map
 fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsConfig {
     match location {
         TlsLocation::MainExecutable { offset } => TlsConfig {
             module_id: 0,
             offset: *offset as u64,
+            tls_offset: 0,  // Not used for main executable
             is_main_executable: 1,
-            _pad: [0; 7],
+            use_static_tls: 0,  // Not applicable for main executable
+            _pad: [0; 6],
             max_record_size,
         },
-        TlsLocation::SharedLibrary { module_id, offset, .. } => TlsConfig {
-            module_id: *module_id as u64,
-            offset: *offset as u64,
-            is_main_executable: 0,
-            _pad: [0; 7],
-            max_record_size,
+        TlsLocation::SharedLibrary { module_id, offset, tls_offset } => {
+            // Determine if eBPF should use static TLS based on tls_offset validity
+            let use_static = is_valid_static_tls_offset(*tls_offset);
+            TlsConfig {
+                module_id: *module_id as u64,
+                offset: *offset as u64,
+                tls_offset: *tls_offset as u64,
+                is_main_executable: 0,
+                use_static_tls: if use_static { 1 } else { 0 },
+                _pad: [0; 6],
+                max_record_size,
+            }
         },
-        TlsLocation::TlsDesc { tls_offset, symbol_offset } => TlsConfig {
-            // For TLSDESC, we don't use DTV - use offset as combined tls_offset + symbol_offset
+        TlsLocation::StaticTls { tls_offset, symbol_offset } => TlsConfig {
+            // For static TLS, we always use static TLS path
             module_id: 0,
-            offset: (*tls_offset + *symbol_offset) as u64,
-            is_main_executable: 1,  // Treat like main executable (direct TP offset)
-            _pad: [0; 7],
+            offset: *symbol_offset as u64,
+            tls_offset: *tls_offset as u64,
+            is_main_executable: 0,
+            use_static_tls: 1,  // Always use static TLS for this variant
+            _pad: [0; 6],
             max_record_size,
         },
     }

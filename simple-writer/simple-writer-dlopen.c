@@ -54,9 +54,13 @@ static void *worker_thread(void *arg) {
     printf("[worker] Attached context. TLS address: %p\n", g_v2_get_tls_address());
     fflush(stdout);
 
-    // Wait for shutdown
+    // Spin to generate CPU samples for eBPF profiler
+    volatile uint64_t counter = 0;
     while (running) {
-        sleep(1);
+        counter++;
+        if ((counter & 0xFFFFFF) == 0) {
+            usleep(1);
+        }
     }
 
     // Cleanup
@@ -206,9 +210,13 @@ int main(void) {
     sa.sa_handler = sigint_handler;
     sigaction(SIGINT, &sa, NULL);
 
-    // Step 9: Wait for signal
+    // Step 9: Spin to generate CPU samples for eBPF profiler
+    volatile uint64_t counter = 0;
     while (running) {
-        pause();
+        counter++;
+        if ((counter & 0xFFFFFF) == 0) {
+            usleep(1);
+        }
     }
 
     printf("\nShutting down...\n");

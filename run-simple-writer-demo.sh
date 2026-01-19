@@ -106,22 +106,17 @@ run_variant() {
         return 1
     fi
 
-    # Step 4: Build context-reader (only once)
+    # Step 4: Build context-reader (always rebuild to pick up changes)
     if [[ "$use_ebpf" == "yes" ]]; then
-        # eBPF mode requires full build including eBPF program
-        if [[ ! -f "context-reader/ebpf/target/bpfel-unknown-none/release/context-reader-ebpf" ]]; then
-            echo "Building context-reader with eBPF support..."
-            cd context-reader
-            cargo xtask build >/dev/null 2>&1
-            cd ..
-        fi
+        echo "Building context-reader with eBPF support..."
+        cd context-reader
+        cargo xtask build >/dev/null 2>&1
+        cd ..
     else
-        if [[ ! -f "context-reader/target/debug/context-reader" ]]; then
-            echo "Building context-reader..."
-            cd context-reader
-            cargo build >/dev/null 2>&1
-            cd ..
-        fi
+        echo "Building context-reader..."
+        cd context-reader
+        cargo build >/dev/null 2>&1
+        cd ..
     fi
 
     # Step 5: Start simple-writer
@@ -147,13 +142,15 @@ run_variant() {
 
     if [[ "$validate" == "yes" ]]; then
         echo "Running context-reader in validate mode${use_ebpf:+ (eBPF)}..."
-        if sudo env RUST_LOG=warn ./context-reader/target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
+	cd context-reader
+        if sudo env RUST_LOG=warn target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
             echo "PASS: $binary"
             result=0
         else
             echo "FAIL: $binary"
             result=1
         fi
+	cd ..
     else
         echo "Starting context-reader to monitor PID $writer_pid${use_ebpf:+ (eBPF)}..."
         sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$writer_pid" --interval 1000 $mode_flag

@@ -14,16 +14,18 @@ use super::memory::read_memory;
 pub enum TlsLocation {
     /// TLS in main executable (static offset from thread pointer)
     MainExecutable { offset: usize },
-    /// TLS in shared library (via DTV lookup, with TLSDESC fallback)
+    /// TLS in shared library (try static TLS first, fall back to DTV)
+    /// Static TLS is faster (single pointer arithmetic) and always valid if the library
+    /// has a static TLS slot. DTV lookup is used as fallback for dlopen'd libraries.
     SharedLibrary {
         module_id: usize,
         offset: usize,
-        /// l_tls_offset from link_map - used as fallback for TLSDESC when DTV isn't available
+        /// l_tls_offset from link_map - used for static TLS calculation
         tls_offset: usize,
     },
-    /// TLS via TLSDESC (direct offset from thread pointer, used with dlopen)
-    /// This is used when the library uses TLSDESC and DTV isn't available
-    TlsDesc { tls_offset: usize, symbol_offset: usize },
+    /// TLS via static offset from thread pointer (legacy, prefer SharedLibrary)
+    /// This is used when module_id is 0 but tls_offset is valid
+    StaticTls { tls_offset: usize, symbol_offset: usize },
 }
 
 /// Get the memory address of a TLS variable in a specific thread.
@@ -46,11 +48,11 @@ pub fn get_tls_variable_address_with_thread_pointer(
             get_tls_via_static_offset_with_tp(thread_pointer, *offset)
         }
         TlsLocation::SharedLibrary { module_id, offset, tls_offset } => {
-            // Try DTV first, fall back to TLSDESC if DTV isn't available
-            get_tls_via_dtv_with_fallback(pid, thread_pointer, *module_id, *offset, *tls_offset)
+            // Try static TLS first (faster), fall back to DTV if unavailable
+            get_tls_for_shared_library(pid, thread_pointer, *module_id, *offset, *tls_offset)
         }
-        TlsLocation::TlsDesc { tls_offset, symbol_offset } => {
-            get_tls_via_tlsdesc_with_tp(thread_pointer, *tls_offset, *symbol_offset)
+        TlsLocation::StaticTls { tls_offset, symbol_offset } => {
+            get_tls_via_static_with_tp(thread_pointer, *tls_offset, *symbol_offset)
         }
     }
 }
@@ -69,43 +71,42 @@ fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -
     Ok(tls_addr as usize)
 }
 
-/// Get TLS address for shared library with DTV lookup and TLSDESC fallback.
-/// First tries DTV lookup, and if that fails (DTV entry is 0 or null),
-/// falls back to TLSDESC-style direct offset calculation.
-fn get_tls_via_dtv_with_fallback(
+/// Check if a tls_offset value is valid for static TLS calculation.
+/// Invalid values include:
+/// - 0: No TLS offset set
+/// - usize::MAX: glibc marker for "use DTV" (dynamic TLS only)
+/// - Values > 1GB: Likely invalid pointers, not offsets
+fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
+    const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
+    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
+}
+
+/// Get TLS address for shared library, trying static TLS first, then DTV.
+/// Static TLS is faster (single pointer arithmetic) and always valid if the
+/// library has a static TLS slot. DTV lookup is used as fallback for dlopen'd
+/// libraries where static TLS may not be available.
+fn get_tls_for_shared_library(
     pid: i32,
     thread_pointer: usize,
     module_id: usize,
     symbol_offset: usize,
-    tls_offset: usize,  // l_tls_offset from link_map for TLSDESC fallback
+    tls_offset: usize,  // l_tls_offset from link_map for static TLS
 ) -> Result<usize> {
-    // Try DTV lookup first
-    match get_tls_via_dtv_with_tp(pid, thread_pointer, module_id, symbol_offset) {
-        Ok(addr) => Ok(addr),
-        Err(e) => {
-            // DTV lookup failed - try TLSDESC fallback
-            debug!(
-                "DTV lookup failed for module {}: {}. Trying TLSDESC fallback with tls_offset={:#x}",
-                module_id, e, tls_offset
-            );
-
-            // Check if tls_offset is valid for TLSDESC fallback:
-            // - 0 means no TLS offset set
-            // - usize::MAX (0xffffffffffffffff) means "use DTV" (glibc marker for dynamic TLS)
-            // - Very large values (> 1GB) are likely invalid pointers, not offsets
-            const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
-            if tls_offset == 0 || tls_offset == usize::MAX || tls_offset > MAX_REASONABLE_TLS_OFFSET {
-                // No valid tls_offset to fall back to
-                anyhow::bail!(
-                    "DTV lookup failed and tls_offset ({:#x}) is not valid for TLSDESC fallback: {}",
-                    tls_offset, e
+    // Try static TLS first (if tls_offset is valid)
+    if is_valid_static_tls_offset(tls_offset) {
+        match get_tls_via_static_with_tp(thread_pointer, tls_offset, symbol_offset) {
+            Ok(addr) => return Ok(addr),
+            Err(e) => {
+                debug!(
+                    "Static TLS failed for module {}: {}. Trying DTV lookup.",
+                    module_id, e
                 );
             }
-
-            // TLSDESC: TLS is at thread_pointer + tls_offset + symbol_offset
-            get_tls_via_tlsdesc_with_tp(thread_pointer, tls_offset, symbol_offset)
         }
     }
+
+    // Fall back to DTV lookup
+    get_tls_via_dtv_with_tp(pid, thread_pointer, module_id, symbol_offset)
 }
 
 /// Get TLS address for shared library using DTV (with pre-computed thread pointer).
@@ -195,20 +196,20 @@ fn get_tls_via_dtv_with_tp(
     Ok(tls_addr)
 }
 
-/// Get TLS address using TLSDESC method (direct offset from thread pointer).
-/// This is used for dlopen'd libraries that use TLSDESC.
+/// Get TLS address using static TLS method (direct offset from thread pointer).
+/// This is the fast path for shared libraries with a static TLS slot.
 ///
 /// Architecture differences:
 /// - x86-64: fs_base points to the TCB, TLS grows downward (before TCB)
 ///   Formula: thread_pointer - tls_offset + symbol_offset
 /// - aarch64: TPIDR points to TLS block start, TLS grows upward
 ///   Formula: thread_pointer + tls_offset + symbol_offset
-fn get_tls_via_tlsdesc_with_tp(
+fn get_tls_via_static_with_tp(
     thread_pointer: usize,
     tls_offset: usize,
     symbol_offset: usize,
 ) -> Result<usize> {
-    // For TLSDESC, the TLS is at a direct offset from the thread pointer
+    // For static TLS, the TLS is at a direct offset from the thread pointer
     // tls_offset comes from l_tls_offset in link_map
     // symbol_offset is the offset of the specific symbol within the TLS block
 
@@ -219,17 +220,17 @@ fn get_tls_via_tlsdesc_with_tp(
     let tls_addr = thread_pointer + tls_offset + symbol_offset;
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("Unsupported architecture for TLSDESC calculation");
+    compile_error!("Unsupported architecture for static TLS calculation");
 
     #[cfg(target_arch = "x86_64")]
     debug!(
-        "TLSDESC TLS address: {:#x} (tp {:#x} - tls_offset {:#x} + sym_offset {:#x})",
+        "Static TLS address: {:#x} (tp {:#x} - tls_offset {:#x} + sym_offset {:#x})",
         tls_addr, thread_pointer, tls_offset, symbol_offset
     );
 
     #[cfg(target_arch = "aarch64")]
     debug!(
-        "TLSDESC TLS address: {:#x} (tp {:#x} + tls_offset {:#x} + sym_offset {:#x})",
+        "Static TLS address: {:#x} (tp {:#x} + tls_offset {:#x} + sym_offset {:#x})",
         tls_addr, thread_pointer, tls_offset, symbol_offset
     );
 

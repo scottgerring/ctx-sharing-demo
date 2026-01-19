@@ -133,12 +133,17 @@ pub fn compute_tls_address_static(thread_pointer: u64, offset: u64) -> u64 {
 pub struct TlsConfig {
     /// For shared libraries: the module ID in the DTV
     pub module_id: u64,
-    /// Offset within the TLS block
+    /// Offset within the TLS block (symbol offset)
     pub offset: u64,
+    /// l_tls_offset for static TLS calculation in shared libraries
+    pub tls_offset: u64,
     /// Non-zero if this is the main executable (uses static TLS offset)
     pub is_main_executable: u8,
+    /// Non-zero if eBPF should use static TLS for shared libraries (fast path)
+    /// Set by userspace based on whether tls_offset is valid
+    pub use_static_tls: u8,
     /// Padding for alignment
-    pub _pad: [u8; 7],
+    pub _pad: [u8; 6],
     /// Maximum size of V2 records (from process context)
     /// Set to 0 for V1 (not applicable)
     pub max_record_size: u64,
@@ -211,7 +216,9 @@ mod std_impls {
             f.debug_struct("TlsConfig")
                 .field("module_id", &self.module_id)
                 .field("offset", &format_args!("{:#x}", self.offset))
+                .field("tls_offset", &format_args!("{:#x}", self.tls_offset))
                 .field("is_main_executable", &(self.is_main_executable != 0))
+                .field("use_static_tls", &(self.use_static_tls != 0))
                 .field("max_record_size", &self.max_record_size)
                 .finish()
         }

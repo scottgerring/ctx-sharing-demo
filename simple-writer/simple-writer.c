@@ -77,9 +77,15 @@ int main(void) {
     sa.sa_handler = sigint_handler;
     sigaction(SIGINT, &sa, NULL);
 
-    // Step 8: Wait for signal
+    // Step 8: Spin to generate CPU samples for eBPF profiler
+    volatile uint64_t counter = 0;
     while (running) {
-        pause();
+        counter++;
+        // Prevent compiler from optimizing away the loop
+        if ((counter & 0xFFFFFF) == 0) {
+            // Occasional yield to prevent 100% CPU on single core
+            usleep(1);
+        }
     }
 
     printf("\nShutting down...\n");
