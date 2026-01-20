@@ -140,7 +140,7 @@ fn get_tls_for_shared_library(
     if let Some(desc_info) = tlsdesc {
         match resolve_tlsdesc(pid, thread_pointer, desc_info) {
             Ok(addr) => {
-                info!(
+                debug!(
                     "TLSDESC resolution succeeded for {}: address={:#x}",
                     desc_info.symbol_name, addr
                 );
@@ -219,21 +219,21 @@ fn validate_tls_methods(
     if all_match {
         match (static_tls, tlsdesc, dtv) {
             (Some(s), Some(t), Some(d)) => {
-                info!("VALIDATION: static TLS ({:#x}) == TLSDESC ({:#x}) == DTV ({:#x}) ✓", s, t, d);
+                debug!("VALIDATION: static TLS ({:#x}) == TLSDESC ({:#x}) == DTV ({:#x}) ✓", s, t, d);
             }
             (Some(s), Some(t), None) => {
-                info!("VALIDATION: static TLS ({:#x}) == TLSDESC ({:#x}) ✓", s, t);
+                debug!("VALIDATION: static TLS ({:#x}) == TLSDESC ({:#x}) ✓", s, t);
             }
             (Some(s), None, Some(d)) => {
-                info!("VALIDATION: static TLS ({:#x}) == DTV ({:#x}) ✓", s, d);
+                debug!("VALIDATION: static TLS ({:#x}) == DTV ({:#x}) ✓", s, d);
             }
             (None, Some(t), Some(d)) => {
-                info!("VALIDATION: TLSDESC ({:#x}) == DTV ({:#x}) ✓", t, d);
+                debug!("VALIDATION: TLSDESC ({:#x}) == DTV ({:#x}) ✓", t, d);
             }
             _ => {}
         }
     } else {
-        // Mismatch detected
+        // Mismatch detected - this is important, keep at info level
         info!(
             "VALIDATION MISMATCH: static TLS={}, TLSDESC={}, DTV={}",
             static_tls.map(|a| format!("{:#x}", a)).unwrap_or_else(|| "N/A".to_string()),
@@ -340,7 +340,7 @@ fn resolve_tlsdesc(
         anyhow::bail!("Unsupported architecture for TLSDESC resolution");
     };
 
-    info!(
+    debug!(
         "TLSDESC resolved: tp={:#x} + arg={:#x} = {:#x}",
         thread_pointer, argument, tls_addr
     );

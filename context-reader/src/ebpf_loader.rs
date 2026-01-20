@@ -15,7 +15,7 @@ use context_reader_common::{KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
 use custom_labels::process_context;
 use custom_labels::v2::process_context_ext::TlsConfig as V2TlsConfigExt;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::output;
 use crate::tls_reader_trait::{Label, LabelValue, ThreadResult};
@@ -71,7 +71,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     // Load the eBPF program from the build output path
     // The BPF program must be built first using:
     //   cd ebpf && cargo build --release
-    info!("Loading eBPF program...");
+    debug!("Loading eBPF program...");
 
     // Look for the BPF binary in expected locations
     let bpf_paths = [
@@ -102,7 +102,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     target_pid
         .insert(0, pid as u32, 0)
         .context("Failed to set target PID")?;
-    info!("Configured target PID: {}", pid);
+    debug!("Configured target PID: {}", pid);
 
     // Configure reader mode
     let mut reader_mode_map: HashMap<_, u32, u8> =
@@ -110,7 +110,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     reader_mode_map
         .insert(0, reader_mode as u8, 0)
         .context("Failed to set reader mode")?;
-    info!("Configured reader mode: {:?}", reader_mode);
+    debug!("Configured reader mode: {:?}", reader_mode);
 
     // Calculate and configure kernel structure offsets from BTF
     configure_kernel_offsets(&mut bpf)?;
@@ -126,7 +126,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     program.load().context("Failed to load perf_event program")?;
 
     let num_cpus = num_cpus()?;
-    info!("Attaching to {} CPUs with frequency {}Hz", num_cpus, sample_freq);
+    debug!("Attaching to {} CPUs with frequency {}Hz", num_cpus, sample_freq);
 
     // CRITICAL: Must keep Link objects alive! If dropped, perf events detach.
     let mut _links = Vec::new();
@@ -143,13 +143,13 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
         _links.push(link);
     }
 
-    info!("eBPF program attached to {} CPUs, processing events...", _links.len());
+    debug!("eBPF program attached to {} CPUs, processing events...", _links.len());
 
     // Process events from ring buffer
     // KEY: Use map_mut() not take_map() so bpf stays alive (otherwise BPF program unloads!)
     let mut ring = RingBuf::try_from(bpf.map_mut("EVENTS").context("EVENTS map not found")?)?;
 
-    info!("RingBuf initialized, starting event loop...");
+    debug!("RingBuf initialized, starting event loop...");
 
     // Event processing loop
     let mut iteration = 0u64;
@@ -201,12 +201,12 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
             let item: &[u8] = &item;
 
             // DEBUG: Log what we actually received
-            info!("Received ringbuf item: {} bytes (expected: {})",
+            debug!("Received ringbuf item: {} bytes (expected: {})",
                   item.len(), std::mem::size_of::<LabelEvent>());
 
             if item.len() >= std::mem::size_of::<LabelEvent>() {
                 let event = unsafe { &*(item.as_ptr() as *const LabelEvent) };
-                info!(
+                debug!(
                     "Received event: tid={}, format={}, data_len={}",
                     event.tid, event.format_version, event.data_len
                 );
@@ -340,7 +340,7 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
         anyhow::bail!("Unsupported architecture for eBPF thread pointer access");
     };
 
-    info!(
+    debug!(
         "Calculated kernel offsets from BTF: task_struct.thread={}, thread_struct.{}={}",
         thread_offset, tp_field_name, tp_offset
     );
@@ -369,7 +369,7 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
         .insert(0, offsets, 0)
         .context("Failed to set kernel offsets")?;
 
-    info!("Kernel offsets configured: {:?}", offsets);
+    debug!("Kernel offsets configured: {:?}", offsets);
 
     Ok(())
 }
@@ -388,9 +388,9 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
                 .insert(0, config, 0)
                 .context("Failed to set V1 TLS config")?;
 
-            info!("V1 TLS configured: {:?}", config);
+            debug!("V1 TLS configured: {:?}", config);
         } else {
-            info!("V1 symbols not found in target process");
+            debug!("V1 symbols not found in target process");
         }
     } else {
         info!("V1 reader disabled by --readers flag");
@@ -422,9 +422,9 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
                 .insert(0, config, 0)
                 .context("Failed to set V2 TLS config")?;
 
-            info!("V2 TLS configured: {:?}", config);
+            debug!("V2 TLS configured: {:?}", config);
         } else {
-            info!("V2 symbols not found in target process");
+            debug!("V2 symbols not found in target process");
         }
     } else {
         info!("V2 reader disabled by --readers flag");

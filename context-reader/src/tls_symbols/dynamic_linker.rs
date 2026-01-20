@@ -5,7 +5,7 @@
 /// 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::debug;
 
 use super::memory::read_memory;
 
@@ -64,7 +64,7 @@ pub fn find_r_debug_address(pid: i32) -> Result<usize> {
         if let MMapPath::Path(ref path) = map.pathname {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if filename.starts_with("ld-linux") || filename.starts_with("ld.so") {
-                info!("Found dynamic linker: {:?}", path);
+                debug!("Found dynamic linker: {:?}", path);
 
                 // Read and parse the dynamic linker
                 let buffer = std::fs::read(path).context("Failed to read dynamic linker")?;
@@ -74,12 +74,12 @@ pub fn find_r_debug_address(pid: i32) -> Result<usize> {
                 for sym in elf.dynsyms.iter() {
                     if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                         if name == "_r_debug" {
-                            info!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
+                            debug!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
 
                             // ld.so is always ET_DYN, need to add base address
                             let base = map.address.0 as usize;
                             let addr = base + sym.st_value as usize;
-                            info!("_r_debug address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
+                            debug!("_r_debug address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
                             return Ok(addr);
                         }
                     }
@@ -161,7 +161,7 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         }
     }
 
-    info!("Found {} loaded libraries", libraries.len());
+    debug!("Found {} loaded libraries", libraries.len());
     Ok(libraries)
 }
 
@@ -243,12 +243,12 @@ pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> 
     let libraries = walk_link_map_chain(pid, r_debug_addr)
         .context("Failed to walk link_map chain")?;
 
-    info!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
+    debug!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
 
     // Match by path - try exact match first
     for lib in &libraries {
         if lib.path == library_path {
-            info!("Resolved TLS info for {:?}: module_id={}, tls_offset={:#x}",
+            debug!("Resolved TLS info for {:?}: module_id={}, tls_offset={:#x}",
                   library_path, lib.module_id, lib.tls_offset);
             return Ok(TlsResolution {
                 module_id: lib.module_id,
@@ -262,7 +262,7 @@ pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> 
     if let Some(target_name) = target_filename {
         for lib in &libraries {
             if lib.path.file_name() == Some(target_name) {
-                info!("Resolved TLS info for {:?} (matched by filename): module_id={}, tls_offset={:#x}",
+                debug!("Resolved TLS info for {:?} (matched by filename): module_id={}, tls_offset={:#x}",
                       library_path, lib.module_id, lib.tls_offset);
                 return Ok(TlsResolution {
                     module_id: lib.module_id,
@@ -273,9 +273,9 @@ pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> 
     }
 
     // Log all libraries for debugging
-    info!("Libraries in link_map chain:");
+    debug!("Libraries in link_map chain:");
     for lib in &libraries {
-        info!("  module_id={}, tls_offset={:#x}: {:?}", lib.module_id, lib.tls_offset, lib.path);
+        debug!("  module_id={}, tls_offset={:#x}: {:?}", lib.module_id, lib.tls_offset, lib.path);
     }
 
     Err(anyhow!("Library {:?} not found in link_map chain", library_path))

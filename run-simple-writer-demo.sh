@@ -143,7 +143,7 @@ run_variant() {
     if [[ "$validate" == "yes" ]]; then
         echo "Running context-reader in validate mode${use_ebpf:+ (eBPF)}..."
 	cd context-reader
-        if sudo env RUST_LOG=warn target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
+        if sudo env RUST_LOG=info target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
             echo "PASS: $binary"
             result=0
         else

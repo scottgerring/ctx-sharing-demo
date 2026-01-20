@@ -299,3 +299,83 @@ pub fn find_library_base_address(pid: i32, library_path: &Path) -> Result<usize>
 
     Err(anyhow!("Library {} not found in process maps", lib_filename))
 }
+
+/// Resolve TLSDESC offset from a target process's GOT entry.
+///
+/// This reads the TLSDESC GOT entry and extracts the `argument` field, which
+/// for statically-linked TLS is the offset to add to the thread pointer.
+///
+/// Returns the raw TLSDESC argument (which includes the symbol offset).
+/// To get the equivalent of `l_tls_offset`, subtract the symbol offset:
+///   `tls_offset = tlsdesc_arg - symbol_offset`
+///
+/// # Arguments
+/// * `pid` - Process ID to read from
+/// * `library_path` - Path to the library (to find its base address)
+/// * `got_offset` - Offset of the TLSDESC GOT entry within the library
+///
+/// # Returns
+/// The TLSDESC argument value, or an error if resolution fails
+#[cfg(target_os = "linux")]
+pub fn resolve_tlsdesc_offset(
+    pid: i32,
+    library_path: &Path,
+    got_offset: usize,
+) -> Result<usize> {
+    use super::memory::read_memory;
+
+    // Step 1: Find library base address in target process
+    let base_addr = find_library_base_address(pid, library_path)
+        .context("Failed to find library base address for TLSDESC resolution")?;
+
+    // Step 2: Calculate runtime address of GOT entry
+    let got_runtime_addr = base_addr + got_offset;
+
+    debug!(
+        "TLSDESC: reading GOT entry at {:#x} (base={:#x} + offset={:#x})",
+        got_runtime_addr, base_addr, got_offset
+    );
+
+    // Step 3: Read the TLSDESC GOT entry (two pointers: resolver, argument)
+    const POINTER_SIZE: usize = std::mem::size_of::<usize>();
+
+    // Skip resolver (first pointer), read argument (second pointer)
+    let mut argument_bytes = [0u8; POINTER_SIZE];
+    read_memory(pid, got_runtime_addr + POINTER_SIZE, &mut argument_bytes)
+        .context("Failed to read TLSDESC argument from GOT")?;
+
+    let argument = usize::from_ne_bytes(argument_bytes);
+
+    debug!("TLSDESC GOT argument: {:#x}", argument);
+
+    // Validate the argument looks reasonable
+    if argument == 0 {
+        anyhow::bail!(
+            "TLSDESC argument is NULL - likely a dynamic TLSDESC (dlopen'd library not yet resolved)"
+        );
+    }
+
+    // Check if argument looks like a valid TLS offset
+    const MAX_REASONABLE_OFFSET: usize = 0x40000000; // 1GB
+
+    #[cfg(target_arch = "x86_64")]
+    let offset_valid = {
+        // On x86_64, might be large value representing negative offset
+        argument <= MAX_REASONABLE_OFFSET || argument > (usize::MAX - MAX_REASONABLE_OFFSET)
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    let offset_valid = argument <= MAX_REASONABLE_OFFSET;
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let offset_valid = false;
+
+    if !offset_valid {
+        anyhow::bail!(
+            "TLSDESC argument {:#x} doesn't look like a valid TLS offset",
+            argument
+        );
+    }
+
+    Ok(argument)
+}
