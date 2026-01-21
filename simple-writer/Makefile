@@ -23,12 +23,13 @@ BUILD_DIR = build
 # Source files
 MAIN_SRC = simple-writer.c
 DLOPEN_SRC = simple-writer-dlopen.c
+EXHAUST_TLS_SRC = simple-writer-exhaust-static-tls.c
 PROCESS_CTX_SRC = process_context.c
 
 # All targets
 TARGETS = simple-writer-static-musl simple-writer-static-glibc \
           simple-writer-dynamic-musl simple-writer-dynamic-glibc \
-          simple-writer-dlopen-glibc
+          simple-writer-dlopen-glibc simple-writer-exhaust-static-tls
 
 .PHONY: all clean $(TARGETS)
 
@@ -80,6 +81,14 @@ simple-writer-dynamic-glibc: $(BUILD_DIR)/process_context-glibc.o
 simple-writer-dlopen-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-o $(BUILD_DIR)/$@ $(DLOPEN_SRC) $(BUILD_DIR)/process_context-glibc.o \
+		-ldl -lpthread
+
+# Variant 6: exhaust-static-tls (dlopen filler first to force DTV usage)
+# This variant loads a TLS filler library before custom-labels to exhaust
+# the static TLS space and force custom-labels to use DTV.
+simple-writer-exhaust-static-tls: $(BUILD_DIR)/process_context-glibc.o
+	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
+		-o $(BUILD_DIR)/$@ $(EXHAUST_TLS_SRC) $(BUILD_DIR)/process_context-glibc.o \
 		-ldl -lpthread
 
 clean:

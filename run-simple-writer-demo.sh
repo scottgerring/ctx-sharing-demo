@@ -20,8 +20,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --labels)
             LABELS="$2"
-            if [[ "$LABELS" != "static" && "$LABELS" != "dynamic" && "$LABELS" != "dlopen" ]]; then
-                echo "ERROR: --labels must be 'static', 'dynamic', or 'dlopen'"
+            if [[ "$LABELS" != "static" && "$LABELS" != "dynamic" && "$LABELS" != "dlopen" && "$LABELS" != "exhaust-static-tls" ]]; then
+                echo "ERROR: --labels must be 'static', 'dynamic', 'dlopen', or 'exhaust-static-tls'"
                 exit 1
             fi
             shift 2
@@ -40,11 +40,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic|dlopen] [--validate] [--validate-all] [--ebpf]"
+            echo "Usage: $0 [--clib musl|glibc] [--labels static|dynamic|dlopen|exhaust-static-tls] [--validate] [--validate-all] [--ebpf]"
             echo ""
             echo "Options:"
             echo "  --clib        C library to use: musl or glibc (default: glibc)"
-            echo "  --labels      Labels linking: static, dynamic, or dlopen (default: dynamic)"
+            echo "  --labels      Labels linking: static, dynamic, dlopen, or exhaust-static-tls (default: dynamic)"
+            echo "                exhaust-static-tls: dlopen a filler library first to force DTV usage"
             echo "  --validate    Run in validation mode (exit after first successful read)"
             echo "  --validate-all  Run all variant combinations in validation mode"
             echo "  --ebpf        Use eBPF mode instead of ptrace"
@@ -65,10 +66,16 @@ run_variant() {
         echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
         return 1
     fi
+    if [[ "$labels" == "exhaust-static-tls" && "$clib" == "musl" ]]; then
+        echo "ERROR: exhaust-static-tls + musl is not supported"
+        return 1
+    fi
 
     # Set binary name
     if [[ "$labels" == "dlopen" ]]; then
         binary="simple-writer-dlopen-glibc"
+    elif [[ "$labels" == "exhaust-static-tls" ]]; then
+        binary="simple-writer-exhaust-static-tls"
     else
         binary="simple-writer-${labels}-${clib}"
     fi
@@ -92,6 +99,14 @@ run_variant() {
     fi
 
     cd ..
+
+    # Build tls-filler library if needed
+    if [[ "$labels" == "exhaust-static-tls" ]]; then
+        echo "Building tls-filler library..."
+        cd tls-filler
+        make >/dev/null 2>&1
+        cd ..
+    fi
 
     # Step 2: Build simple-writer
     echo "Building simple-writer variant..."
@@ -194,10 +209,13 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
     results=""
 
     # Test all combinations
-    for labels in static dynamic dlopen; do
+    for labels in static dynamic dlopen exhaust-static-tls; do
         for clib in glibc musl; do
             # Skip invalid combinations
             if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
+                continue
+            fi
+            if [[ "$labels" == "exhaust-static-tls" && "$clib" == "musl" ]]; then
                 continue
             fi
 
@@ -208,6 +226,8 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
                 passed=$((passed + 1))
                 if [[ "$labels" == "dlopen" ]]; then
                     results="${results}PASS: simple-writer-dlopen-glibc\n"
+                elif [[ "$labels" == "exhaust-static-tls" ]]; then
+                    results="${results}PASS: simple-writer-exhaust-static-tls\n"
                 else
                     results="${results}PASS: simple-writer-${labels}-${clib}\n"
                 fi
@@ -215,6 +235,8 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
                 failed=$((failed + 1))
                 if [[ "$labels" == "dlopen" ]]; then
                     results="${results}FAIL: simple-writer-dlopen-glibc\n"
+                elif [[ "$labels" == "exhaust-static-tls" ]]; then
+                    results="${results}FAIL: simple-writer-exhaust-static-tls\n"
                 else
                     results="${results}FAIL: simple-writer-${labels}-${clib}\n"
                 fi
@@ -252,10 +274,16 @@ if [[ "$LABELS" == "dynamic" && "$CLIB" == "musl" ]]; then
     echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
     exit 1
 fi
+if [[ "$LABELS" == "exhaust-static-tls" && "$CLIB" == "musl" ]]; then
+    echo "ERROR: exhaust-static-tls + musl is not supported"
+    exit 1
+fi
 
 # Set binary name
 if [[ "$LABELS" == "dlopen" ]]; then
     BINARY="simple-writer-dlopen-glibc"
+elif [[ "$LABELS" == "exhaust-static-tls" ]]; then
+    BINARY="simple-writer-exhaust-static-tls"
 else
     BINARY="simple-writer-${LABELS}-${CLIB}"
 fi
@@ -275,12 +303,20 @@ if [[ "$LABELS" == "static" ]]; then
     echo "  Building static library (libcustomlabels.a)..."
     make libcustomlabels.a
 else
-    # Both dynamic and dlopen variants need the shared library
+    # Both dynamic, dlopen, and exhaust-static-tls variants need the shared library
     echo "  Building shared library (libcustomlabels.so)..."
     make libcustomlabels.so
 fi
 
 cd ..
+
+# Build tls-filler library if needed
+if [[ "$LABELS" == "exhaust-static-tls" ]]; then
+    echo "Step 1b: Building tls-filler library..."
+    cd tls-filler
+    make
+    cd ..
+fi
 echo ""
 
 # Step 2: Build simple-writer

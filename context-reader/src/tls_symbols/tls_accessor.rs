@@ -23,7 +23,7 @@ pub enum TlsLocation {
         offset: usize,
         /// l_tls_offset from link_map - used for static TLS calculation
         tls_offset: usize,
-        /// Optional TLSDESC info for fallback resolution
+        /// Optional TLSDESC info for DTV lookup when static TLS unavailable
         tlsdesc: Option<TlsDescInfo>,
     },
     /// TLS via static offset from thread pointer (legacy, prefer SharedLibrary)
