@@ -24,4 +24,4 @@ sleep 10
 
 # Start context-reader to monitor the Java process
 echo "Starting context-reader to monitor PID $JAVA_PID..."
-./context-reader/target/debug/context-reader "$JAVA_PID" --interval 1000
+sudo ./context-reader/target/debug/context-reader "$JAVA_PID" --interval 1000

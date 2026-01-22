@@ -74,4 +74,7 @@ custom_labels_v2_tl_record_t *custom_labels_v2_set_current_record(
 // Get the current thread's active record.
 custom_labels_v2_tl_record_t *custom_labels_v2_get_current_record(void);
 
+// Debug helper: get the address of the TLS variable itself (not its value)
+void *custom_labels_v2_get_tls_address(void);
+
 #endif /* CUSTOMLABELS_V2_H */

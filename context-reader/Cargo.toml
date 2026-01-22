@@ -1,7 +1,28 @@
+[workspace]
+members = [".", "common", "xtask"]
+exclude = ["ebpf"]
+resolver = "2"
+
 [package]
 name = "context-reader"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "context_reader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dump-symbols"
+path = "src/bin/dump-symbols.rs"
+
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+
+[[bin]]
+name = "tail"
+path = "src/bin/tail.rs"
 
 [dependencies]
 goblin = "0.9"
@@ -12,11 +33,18 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 comfy-table = "7.1"
 
+# Shared types with eBPF program
+context-reader-common = { path = "common", features = ["std"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["process", "ptrace", "uio"] }
 procfs = "0.17"
 libc = "0.2"
 
+# eBPF userspace loader
+aya = "0.13"
+aya-log = "0.2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time"] }
+bytes = "1"
+
 custom-labels = { path = "../custom-labels" }
-
-

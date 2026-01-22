@@ -11,6 +11,20 @@ pub enum LabelValue {
     Bytes(Vec<u8>),
 }
 
+impl std::fmt::Display for LabelValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LabelValue::Text(s) => write!(f, "{}", s),
+            LabelValue::Bytes(b) => {
+                for byte in b {
+                    write!(f, "{:02x}", byte)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Parsed label (key-value pair)
 #[derive(Debug, Clone)]
 pub struct Label {

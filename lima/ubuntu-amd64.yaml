@@ -1,0 +1,76 @@
+# Lima VM configuration for eBPF development (AMD64)
+# Usage: limactl start ./lima/ubuntu-amd64.yaml
+
+arch: x86_64
+vmType: qemu
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/25.10/release/ubuntu-25.10-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+cpus: 4
+memory: "8GiB"
+disk: "50GiB"
+
+mounts:
+  - location: "~"
+    writable: true
+
+containerd:
+  system: false
+  user: false
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        libclang-dev \
+        llvm-dev \
+        openjdk-21-jdk \
+        dwarves \
+        linux-tools-common \
+        linux-tools-generic \
+        bpftool \
+        musl-dev \
+        musl-tools \
+        curl \
+        git
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+
+      # Install Rust via rustup
+      if ! command -v rustup &> /dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      fi
+
+      source "$HOME/.cargo/env"
+
+      # Install nightly toolchain (required for eBPF builds)
+      rustup toolchain install nightly
+
+      # Add rust-src component (required for -Z build-std)
+      rustup component add rust-src --toolchain nightly
+
+      # Install bpf-linker (required for linking eBPF programs)
+      cargo install bpf-linker
+
+      # Ensure stable is up to date
+      rustup update stable
+
+message: |
+  eBPF development VM (AMD64) is ready!
+
+  To access: limactl shell ubuntu-amd64
+  Rust toolchain with nightly and bpf-linker is installed.

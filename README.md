@@ -1,45 +1,63 @@
-# Context Sharing Demo
+# TLS Context Sharing Demo
 
-This repo contains a minimal implementation of our v2 proposal for the **TLS Context Storage Mechanism**, as well as a sample
-implementation of a writer and a reader. 
+Demonstrates reading and writing thread-local observability context (trace IDs, span IDs, custom attributes) via TLS variables that profilers can read out-of-process.
 
-**NOTE: all of this is **Linux Only!**. There is a `.devcontainer` in the root of the repository to make it easier to work on this on 
-non-linux machines in for instance VSCode or RustRover.**
+**Linux only.** Use the `.devcontainer` or Lima VMs in `lima/` if you're not on Linux yourself!
 
-## Components
+## custom-labels
 
-* [custom-labels](custom-labels): A fork of the PolarSignals custom-labels repository, with added support for the v2 TLS proposal, as well as a minimal implementation of [OTEP-4719 - Process Context](https://github.com/open-telemetry/opentelemetry-specification/pull/4719/files), which the TLS implementation relies upon
-* [context-writer](context-writer): An application that launches a bunch of threads and writes webserver-looking context information to them
-* [context-reader](context-reader): An application that can be used to read v1 and v2 TLS information out of a running process, periodically dumping it out to the screen
+Fork of [polarsignals/custom-labels](https://github.com/polarsignals/custom-labels) with two additions:
 
-In the [datadog](datadog) directory, you will additionally find an  actix web implementation using a version of [dd-trace-rs](TODO) modified to 
-capture the thread context automatically.  
+1. **v2 TLS format** - Adds `custom_labels_current_set_v2` symbol supporting arbitrary string attributes plus trace context. See [custom-labels/README.md](custom-labels/README.md).
 
-## Getting started
+2. **Process Context** - Rust implementation of [OTEP-4719](https://github.com/open-telemetry/opentelemetry-specification/pull/4719) for publishing key tables via named memory mappings.
 
-From a Linux machine (or a devcontainer) with the Rust and LLVM tooling installed:
+## context-reader
+
+Out-of-process reader for custom-labels v1/v2. Three binaries:
+
+| Binary | Purpose |
+|--------|---------|
+| `dump-symbols` | Debug TLS symbol resolution for a process |
+| `validate` | One-shot validation that labels can be read |
+| `tail` | Continuous monitoring via ptrace or eBPF |
+
+Requires root or `CAP_SYS_PTRACE`. See [context-reader/README.md](context-reader/README.md).
+
+## simple-writer
+
+Test programs that write custom-labels across different linking scenarios (static/dynamic/dlopen, glibc/musl). Used to verify context-reader works in all TLS configurations including DTV fallback.
+
+See [simple-writer/README.md](simple-writer/README.md).
+
+## Quick Start
 
 ```bash
-# Build and run the reader and the writer, and then launch them both, showing the reader 
-# polling context out of the writer using ptrace. 
-./run-context-writer-demo.sh
+# Run simple-writer with context-reader validation (builds everything)
+# Optional: add --ebpf to use the ebpf reading path
+./run-simple-writer-demo.sh --validate
+
+# Test all linking variants
+./run-simple-writer-demo.sh --validate-all
+
+# Interactive monitoring
+./run-simple-writer-demo.sh --labels dynamic
 ```
 
-You can also use context-reader to check that the TLS info is appearing properly in the binary of
-a running process: 
-```bash
-cd context-reader
-cargo run -- --print-tls 12345
+## Other Components
 
-> 2025-12-11T13:22:19.444095Z  INFO context_reader::tls_symbols::elf_reader: Found OBJECT symbol __libc_enable_secure in dynsyms
-> 2025-12-11T13:22:19.444099Z  INFO context_reader::tls_symbols::process: Found 10 TLS/OBJECT symbols in: "/lib/aarch64-linux-gnu/ld-2.31.so"
-> ╭                                                                   ╮
->   Symbol Name                   Type  Source  Binary              
->   custom_labels_current_set_v2  TLS   dynsym  context-writer      
->   custom_labels_current_set     TLS   dynsym  context-writer      
->   errno                         TLS   dynsym  libc-2.31.so
-> ...         
-```
+| Directory | Description |
+|-----------|-------------|
+| `context-writer` | Rust app that spawns threads writing webserver-style context |
+| `datadog` | Actix web app using modified dd-trace-rs for automatic context capture |
+| `tls-filler` | Helper libraries to exhaust static TLS space for testing DTV path |
+| `lima` | VM templates for arm64/amd64 testing |
 
-If your symbols don't appear, try adding `--include-obj` and `--include-symtab` to see if they've
-ended up somewhere else. 
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `run-simple-writer-demo.sh` | Build and test simple-writer variants |
+| `run-context-writer-demo.sh` | Run context-writer with context-reader |
+| `run-dd-writer-demo.sh` | Run datadog demo |
+| `run-java-demo.sh` | Run Java demo | 

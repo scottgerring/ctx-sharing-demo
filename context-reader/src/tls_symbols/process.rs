@@ -1,11 +1,12 @@
 use anyhow::{bail, Context, Result};
+use context_reader_common::is_valid_static_tls_offset;
 use procfs::process::{MMapPath, Process};
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{debug, info};
 
 use super::dynamic_linker;
-use super::elf_reader::SymbolInfo;
-use super::tls_accessor::TlsLocation;
+use super::elf_reader::{find_tlsdesc_relocation, resolve_tlsdesc_offset, SymbolInfo};
+use super::tls_accessor::{TlsDescInfo, TlsLocation};
 
 /// Information about a TLS symbol found in a loaded binary (executable or shared library)
 #[derive(Debug, Clone)]
@@ -50,14 +51,14 @@ pub fn find_symbols_in_process(pid: i32) -> Result<Vec<FoundSymbols>> {
                 if !symbol_info.is_main_executable {
                     if let Some(ref exe) = exe_path {
                         if exe == path {
-                            info!("Marking {:?} as main executable (PIE binary)", path);
+                            debug!("Marking {:?} as main executable (PIE binary)", path);
                             symbol_info.is_main_executable = true;
                         }
                     }
                 }
 
                 if !symbol_info.symbols.is_empty() {
-                    info!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
+                    debug!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
                         symbol_info.symbols.len(), path, symbol_info.is_main_executable);
                     results.push(FoundSymbols {
                         pid,
@@ -138,24 +139,119 @@ impl FoundSymbols {
 
         // Determine TLS location
         let tls_location = if self.symbol_info.is_main_executable {
-            // Main executable: use static offset
-            let offset = symbol.st_value as usize;
-            info!(
-                "Using static TLS offset for main executable: {:#x}",
-                offset
+            // Main executable: use static offset calculation
+            let st_value = symbol.st_value as u64;
+
+            // Use the shared calculation function with current architecture
+            let offset = context_reader_common::calculate_static_tls_offset(
+                st_value,
+                self.symbol_info.tls_block_size.map(|s| s as u64),
+                context_reader_common::CURRENT_ARCH,
+            ) as usize;
+
+            debug!(
+                "Main executable TLS: st_value={:#x}, tls_block_size={:?}, offset={:#x}",
+                st_value, self.symbol_info.tls_block_size, offset
             );
+
             TlsLocation::MainExecutable { offset }
         } else {
-            // Shared library: need to resolve module ID
-            info!("Resolving module ID for shared library: {:?}", self.path);
-            let module_id = dynamic_linker::resolve_module_id(self.pid, &self.path)
-                .context("Failed to resolve module ID for shared library")?;
-            let offset = symbol.st_value as usize;
-            info!(
-                "Using DTV lookup: module_id={}, offset={:#x}",
-                module_id, offset
-            );
-            TlsLocation::SharedLibrary { module_id, offset }
+            // Shared library: need to resolve module ID and TLS offset
+            debug!("Resolving TLS info for shared library: {:?}", self.path);
+            let tls_info = dynamic_linker::resolve_tls_info(self.pid, &self.path)
+                .context("Failed to resolve TLS info for shared library")?;
+
+            if tls_info.module_id == 0 {
+                // module_id == 0 means this library's TLS is in static TLS space
+                // (allocated at program startup), not in the DTV
+                let st_value = symbol.st_value as u64;
+                let offset = context_reader_common::calculate_static_tls_offset(
+                    st_value,
+                    self.symbol_info.tls_block_size.map(|s| s as u64),
+                    context_reader_common::CURRENT_ARCH,
+                ) as usize;
+                debug!(
+                    "Shared library with module_id=0: st_value={:#x}, tls_block_size={:?}, offset={:#x}",
+                    st_value, self.symbol_info.tls_block_size, offset
+                );
+                TlsLocation::MainExecutable { offset }
+            } else {
+                let offset = symbol.st_value as usize;
+                let mut tls_offset = tls_info.tls_offset;
+                let mut tls_offset_source = if is_valid_static_tls_offset(tls_offset) {
+                    "l_tls_offset"
+                } else {
+                    "invalid"
+                };
+
+                // Try to find TLSDESC relocation for this symbol
+                let tlsdesc = match find_tlsdesc_relocation(&self.path, symbol_name) {
+                    Ok(Some(reloc)) => {
+                        debug!(
+                            "Found TLSDESC relocation for {}: got_offset={:#x}",
+                            symbol_name, reloc.got_offset
+                        );
+                        Some(TlsDescInfo {
+                            library_path: self.path.clone(),
+                            got_offset: reloc.got_offset,
+                            symbol_name: symbol_name.to_string(),
+                        })
+                    }
+                    Ok(None) => {
+                        debug!("No TLSDESC relocation found for {} in {:?}", symbol_name, self.path);
+                        None
+                    }
+                    Err(e) => {
+                        debug!("Error looking up TLSDESC relocation for {}: {}", symbol_name, e);
+                        None
+                    }
+                };
+
+                // If tls_offset from link_map is invalid, try to resolve via TLSDESC
+                if !is_valid_static_tls_offset(tls_offset) {
+                    if let Some(ref desc_info) = tlsdesc {
+                        match resolve_tlsdesc_offset(self.pid, &desc_info.library_path, desc_info.got_offset) {
+                            Ok(tlsdesc_arg) => {
+                                // TLSDESC arg = tls_offset + symbol_offset (on aarch64)
+                                // So: tls_offset = tlsdesc_arg - symbol_offset
+                                let computed_tls_offset = tlsdesc_arg.wrapping_sub(offset);
+                                debug!(
+                                    "Resolved tls_offset via TLSDESC for {}: tlsdesc_arg={:#x} - symbol_offset={:#x} = {:#x}",
+                                    symbol_name, tlsdesc_arg, offset, computed_tls_offset
+                                );
+                                tls_offset = computed_tls_offset;
+                                tls_offset_source = "TLSDESC";
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "TLSDESC resolution failed for {}, will use DTV at runtime: {}",
+                                    symbol_name, e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Determine the resolution method for logging
+                let resolution_method = if is_valid_static_tls_offset(tls_offset) {
+                    format!("static TLS (via {})", tls_offset_source)
+                } else if tlsdesc.is_some() {
+                    "TLSDESC → DTV fallback".to_string()
+                } else {
+                    "DTV only".to_string()
+                };
+
+                info!(
+                    "TLS for {}: {} [module_id={}, tls_offset={:#x}]",
+                    symbol_name, resolution_method, tls_info.module_id, tls_offset
+                );
+                TlsLocation::SharedLibrary {
+                    module_id: tls_info.module_id,
+                    offset,
+                    tls_offset,
+                    tlsdesc,
+                }
+            }
         };
 
         Ok(LoadedTlsSymbol {

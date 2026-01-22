@@ -4,18 +4,21 @@
 //! with custom attributes using indexed keys from the key table.
 
 use anyhow::{Context, Result};
-use custom_labels::process_context::{self};
+use custom_labels::process_context::ProcessContext;
 use custom_labels::v2::process_context_ext::TlsConfig;
 use custom_labels::v2::reader::{ParsedRecord, ParseError};
 use tracing::{debug, info};
 
 use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
-use crate::tls_symbols::process::LoadedTlsSymbol;
+use crate::tls_symbols::process::{FoundSymbols, LoadedTlsSymbol};
 use crate::tls_symbols::tls_accessor;
 
 // V2 symbol name
-const CUSTOM_LABELS_CURRENT_SET_V2: &str = "custom_labels_current_set_v2";
+pub const CUSTOM_LABELS_CURRENT_SET_V2: &str = "custom_labels_current_set_v2";
+
+/// Symbols required for V2 reader
+pub const REQUIRED_SYMBOLS: &[&str] = &[CUSTOM_LABELS_CURRENT_SET_V2];
 
 /// V2 TLS Reader for the binary TL record format
 pub struct V2Reader {
@@ -25,16 +28,10 @@ pub struct V2Reader {
 }
 
 impl V2Reader {
-    /// Try to set up the V2 reader for a target process.
-    /// Reads the key table from process-context.
-    pub fn try_setup(pid: i32) -> Result<Self> {
-        use crate::tls_symbols::process::find_known_symbols_in_process;
-
-        // Read process-context and parse TLS config
-        let process_ctx = process_context::read_process_context_from_pid(pid)
-            .context("Failed to read process-context for v2 setup")?;
-
-        let tls_config = TlsConfig::from_process_context(&process_ctx)
+    /// Try to set up the V2 reader from pre-scanned symbols and process context.
+    pub fn try_setup(all_symbols: &[FoundSymbols], process_ctx: &ProcessContext) -> Result<Self> {
+        // Parse TLS config from process-context
+        let tls_config = TlsConfig::from_process_context(process_ctx)
             .ok_or_else(|| anyhow::anyhow!("No TLS config in process-context"))?;
 
         info!(
@@ -46,10 +43,15 @@ impl V2Reader {
             debug!(key_index = idx, key_name = %name, "V2 key");
         }
 
-        // Find the v2 TLS symbol
-        let required_symbols = &[CUSTOM_LABELS_CURRENT_SET_V2];
-        let found = find_known_symbols_in_process(pid, required_symbols)
-            .context("Failed to find v2 custom labels symbol")?;
+        // Find the binary that has our required symbol
+        let found = all_symbols
+            .iter()
+            .find(|s| {
+                REQUIRED_SYMBOLS
+                    .iter()
+                    .all(|sym| s.symbol_info.symbols.contains_key(*sym))
+            })
+            .ok_or_else(|| anyhow::anyhow!("No binary found with v2 custom labels symbol"))?;
 
         info!(
             "V2 reader: found {} in {}",
@@ -111,16 +113,23 @@ impl V2Reader {
     /// Read the raw record bytes from process memory.
     /// Returns None if the record pointer is null.
     fn read_record_memory(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<u8>>> {
+        debug!("V2 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
+        debug!("V2 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
+
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
             ctx.thread_pointer,
             &self.library.tls_location,
         )?;
 
+        debug!("V2 TLS addr for tid {}: {:#x}", ctx.tid, tls_addr);
+
         // Read the pointer to the v2 record
         let mut ptr_bytes = [0u8; 8];
         read_memory(pid, tls_addr, &mut ptr_bytes)?;
         let record_ptr = usize::from_ne_bytes(ptr_bytes);
+
+        debug!("V2 record_ptr for tid {}: {:#x} (raw bytes: {:02x?})", ctx.tid, record_ptr, ptr_bytes);
 
         if record_ptr == 0 {
             return Ok(None);

@@ -5,12 +5,15 @@ use tracing::info;
 
 use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
-use crate::tls_symbols::process::LoadedTlsSymbol;
+use crate::tls_symbols::process::{FoundSymbols, LoadedTlsSymbol};
 use crate::tls_symbols::tls_accessor;
 
 // Custom labels symbol names
-const CUSTOM_LABELS_CURRENT_SET: &str = "custom_labels_current_set";
-const CUSTOM_LABELS_ABI_VERSION: &str = "custom_labels_abi_version";
+pub const CUSTOM_LABELS_CURRENT_SET: &str = "custom_labels_current_set";
+pub const CUSTOM_LABELS_ABI_VERSION: &str = "custom_labels_abi_version";
+
+/// Symbols required for V1 reader
+pub const REQUIRED_SYMBOLS: &[&str] = &[CUSTOM_LABELS_CURRENT_SET, CUSTOM_LABELS_ABI_VERSION];
 
 // Expected ABI version
 const EXPECTED_ABI_VERSION: u32 = 1;
@@ -44,15 +47,19 @@ pub struct V1Reader {
 }
 
 impl V1Reader {
-    /// Try to set up the V1 reader for a target process
-    pub fn try_setup(pid: i32) -> Result<Self> {
-        use crate::tls_symbols::process::find_known_symbols_in_process;
+    /// Try to set up the V1 reader from pre-scanned symbols
+    pub fn try_setup(all_symbols: &[FoundSymbols]) -> Result<Self> {
         use std::fs;
 
-        let required_symbols = &[CUSTOM_LABELS_CURRENT_SET, CUSTOM_LABELS_ABI_VERSION];
-
-        let found = find_known_symbols_in_process(pid, required_symbols)
-            .context("Failed to find v1 custom labels symbols")?;
+        // Find the binary that has our required symbols
+        let found = all_symbols
+            .iter()
+            .find(|s| {
+                REQUIRED_SYMBOLS
+                    .iter()
+                    .all(|sym| s.symbol_info.symbols.contains_key(*sym))
+            })
+            .ok_or_else(|| anyhow::anyhow!("No binary found with v1 custom labels symbols"))?;
 
         // Validate ABI version
         let abi_entry = found
@@ -130,6 +137,9 @@ impl V1Reader {
     /// No ptrace attach/detach - that's handled by the caller.
     fn read_thread_labels(&self, pid: i32, ctx: &ThreadContext) -> Result<Vec<Label>> {
         use tracing::debug;
+
+        debug!("V1 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
+        debug!("V1 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
 
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,

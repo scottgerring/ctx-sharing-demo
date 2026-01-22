@@ -5,7 +5,7 @@
 /// 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::debug;
 
 use super::memory::read_memory;
 
@@ -18,6 +18,8 @@ pub struct LoadedLibrary {
     pub base_address: usize,
     /// TLS module ID assigned by the dynamic linker
     pub module_id: usize,
+    /// TLS offset from thread pointer (l_tls_offset for static TLS calculation)
+    pub tls_offset: usize,
 }
 
 /// link_map structure from glibc (partial - only the fields we need)
@@ -62,7 +64,7 @@ pub fn find_r_debug_address(pid: i32) -> Result<usize> {
         if let MMapPath::Path(ref path) = map.pathname {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if filename.starts_with("ld-linux") || filename.starts_with("ld.so") {
-                info!("Found dynamic linker: {:?}", path);
+                debug!("Found dynamic linker: {:?}", path);
 
                 // Read and parse the dynamic linker
                 let buffer = std::fs::read(path).context("Failed to read dynamic linker")?;
@@ -72,12 +74,12 @@ pub fn find_r_debug_address(pid: i32) -> Result<usize> {
                 for sym in elf.dynsyms.iter() {
                     if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                         if name == "_r_debug" {
-                            info!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
+                            debug!("Found _r_debug symbol at offset: {:#x}", sym.st_value);
 
                             // ld.so is always ET_DYN, need to add base address
                             let base = map.address.0 as usize;
                             let addr = base + sym.st_value as usize;
-                            info!("_r_debug address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
+                            debug!("_r_debug address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
                             return Ok(addr);
                         }
                     }
@@ -113,6 +115,9 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         // Read the actual l_tls_modid from the link_map structure
         let tls_modid = read_tls_modid(pid, current_addr)?;
 
+        // Read l_tls_offset (used for static TLS calculation)
+        let tls_offset = read_tls_offset(pid, current_addr)?;
+
         // Read the library name
         let name = if link_map.l_name != 0 {
             read_string_from_process(pid, link_map.l_name)?
@@ -121,8 +126,8 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         };
 
         debug!(
-            "link_map[{}]: base={:#x}, l_tls_modid={}, name={:?}",
-            position, link_map.l_addr, tls_modid, name
+            "link_map[{}]: base={:#x}, l_tls_modid={}, l_tls_offset={:#x}, name={:?}",
+            position, link_map.l_addr, tls_modid, tls_offset, name
         );
 
         // Add to list if it has a name (skip main executable with empty name)
@@ -132,6 +137,7 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
                 path: PathBuf::from(name),
                 base_address: link_map.l_addr,
                 module_id: tls_modid,
+                tls_offset,
             });
         } else if position == 1 {
             // First entry is main executable
@@ -142,6 +148,7 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
                 path: exe_path,
                 base_address: link_map.l_addr,
                 module_id: tls_modid,
+                tls_offset,
             });
         }
 
@@ -154,51 +161,99 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
         }
     }
 
-    info!("Found {} loaded libraries", libraries.len());
+    debug!("Found {} loaded libraries", libraries.len());
     Ok(libraries)
 }
 
-/// Read a value from link_map that we can use to derive the DTV index.
+/// Read TLS-related values from link_map structure.
 ///
-/// The glibc link_map structure contains TLS-related fields we can use 
-/// to find this.
-/// 
-/// The magic numbers in here were found from glibc 2.39 on aarch64, 
-/// and also work on same glibc amd64.
-/// 
-/// There's got to be a more robust way of doing this!
+/// The glibc link_map structure contains TLS-related fields:
+/// - l_tls_modid: Module ID for DTV indexing
+/// - l_tls_offset: Offset from thread pointer (used for static TLS calculation)
+///
+/// The offsets were determined from glibc's _thread_db_link_map_l_tls_* symbols:
+/// - l_tls_offset: offset 1168 (0x490)
+/// - l_tls_modid: offset 1176 (0x498)
+///
+/// These may vary between glibc versions. A more robust approach would be
+/// to read the _thread_db_link_map_l_tls_* symbols from the target process.
 ///
 fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
-    const TLS_FIELD_OFFSET: usize = 0x310;
+    // Offset from _thread_db_link_map_l_tls_modid
+    // These offsets vary by architecture (determined via GDB inspection of the symbol)
+    #[cfg(target_arch = "x86_64")]
+    const TLS_MODID_OFFSET: usize = 0x490;  // 1168 on x86-64
 
-    let field_addr = link_map_addr + TLS_FIELD_OFFSET;
+    #[cfg(target_arch = "aarch64")]
+    const TLS_MODID_OFFSET: usize = 0x498;  // 1176 on ARM64
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("Unsupported architecture for TLS_MODID_OFFSET");
+
+    let field_addr = link_map_addr + TLS_MODID_OFFSET;
     let mut buffer = [0u8; std::mem::size_of::<usize>()];
     read_memory(pid, field_addr, &mut buffer)?;
-    let stored_value = usize::from_ne_bytes(buffer);
+    let module_id = usize::from_ne_bytes(buffer);
 
-    // Empirically, we need to add 1 to get the correct DTV index
-    let dtv_index = if stored_value > 0 { stored_value + 1 } else { 0 };
+    // l_tls_modid directly corresponds to the DTV index:
+    // - dtv[0] = generation counter
+    // - dtv[n] = module n's TLS block (where n = l_tls_modid)
+    debug!("link_map {:#x}: l_tls_modid at offset {:#x} = {}",
+           link_map_addr, TLS_MODID_OFFSET, module_id);
 
-    debug!("link_map {:#x}: offset {:#x} value={}, dtv_index={}",
-           link_map_addr, TLS_FIELD_OFFSET, stored_value, dtv_index);
-
-    Ok(dtv_index)
+    Ok(module_id)
 }
 
-/// Resolve the module ID for a specific library path
-pub fn resolve_module_id(pid: i32, library_path: &Path) -> Result<usize> {
+/// Read l_tls_offset from link_map structure.
+/// This is the offset from thread pointer used for static TLS calculation.
+fn read_tls_offset(pid: i32, link_map_addr: usize) -> Result<usize> {
+    // Offset from _thread_db_link_map_l_tls_offset
+    // These offsets vary by architecture (determined via GDB inspection of the symbol)
+    #[cfg(target_arch = "x86_64")]
+    const TLS_OFFSET_OFFSET: usize = 0x488;  // 1160 on x86-64
+
+    #[cfg(target_arch = "aarch64")]
+    const TLS_OFFSET_OFFSET: usize = 0x490;  // 1168 on ARM64
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("Unsupported architecture for TLS_OFFSET_OFFSET");
+
+    let field_addr = link_map_addr + TLS_OFFSET_OFFSET;
+    let mut buffer = [0u8; std::mem::size_of::<usize>()];
+    read_memory(pid, field_addr, &mut buffer)?;
+    let tls_offset = usize::from_ne_bytes(buffer);
+
+    debug!("link_map {:#x}: l_tls_offset at offset {:#x} = {:#x}",
+           link_map_addr, TLS_OFFSET_OFFSET, tls_offset);
+
+    Ok(tls_offset)
+}
+
+/// TLS resolution info for a library
+#[derive(Debug, Clone)]
+pub struct TlsResolution {
+    pub module_id: usize,
+    pub tls_offset: usize,
+}
+
+/// Resolve the module ID and TLS offset for a specific library path
+pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> {
     let r_debug_addr = find_r_debug_address(pid)
         .context("Failed to find _r_debug address")?;
     let libraries = walk_link_map_chain(pid, r_debug_addr)
         .context("Failed to walk link_map chain")?;
 
-    info!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
+    debug!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
 
     // Match by path - try exact match first
     for lib in &libraries {
         if lib.path == library_path {
-            info!("Resolved module ID {} for {:?}", lib.module_id, library_path);
-            return Ok(lib.module_id);
+            debug!("Resolved TLS info for {:?}: module_id={}, tls_offset={:#x}",
+                  library_path, lib.module_id, lib.tls_offset);
+            return Ok(TlsResolution {
+                module_id: lib.module_id,
+                tls_offset: lib.tls_offset,
+            });
         }
     }
 
@@ -207,19 +262,28 @@ pub fn resolve_module_id(pid: i32, library_path: &Path) -> Result<usize> {
     if let Some(target_name) = target_filename {
         for lib in &libraries {
             if lib.path.file_name() == Some(target_name) {
-                info!("Resolved module ID {} for {:?} (matched by filename)", lib.module_id, library_path);
-                return Ok(lib.module_id);
+                debug!("Resolved TLS info for {:?} (matched by filename): module_id={}, tls_offset={:#x}",
+                      library_path, lib.module_id, lib.tls_offset);
+                return Ok(TlsResolution {
+                    module_id: lib.module_id,
+                    tls_offset: lib.tls_offset,
+                });
             }
         }
     }
 
     // Log all libraries for debugging
-    info!("Libraries in link_map chain:");
+    debug!("Libraries in link_map chain:");
     for lib in &libraries {
-        info!("  module_id={}: {:?}", lib.module_id, lib.path);
+        debug!("  module_id={}, tls_offset={:#x}: {:?}", lib.module_id, lib.tls_offset, lib.path);
     }
 
     Err(anyhow!("Library {:?} not found in link_map chain", library_path))
+}
+
+/// Resolve the module ID for a specific library path (legacy function)
+pub fn resolve_module_id(pid: i32, library_path: &Path) -> Result<usize> {
+    resolve_tls_info(pid, library_path).map(|info| info.module_id)
 }
 
 /// Read r_debug structure from process memory
