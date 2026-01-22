@@ -8,6 +8,20 @@
 /// Maximum size of label data we can transfer per event
 pub const MAX_LABEL_DATA_SIZE: usize = 2048;
 
+/// Maximum reasonable TLS offset (1GB)
+/// Values larger than this are likely invalid pointers, not offsets.
+pub const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000;
+
+/// Check if a tls_offset value is valid for static TLS calculation.
+/// Invalid values include:
+/// - 0: No TLS offset set
+/// - usize::MAX: glibc marker for "use DTV" (dynamic TLS only)
+/// - Values > 1GB: Likely invalid pointers, not offsets
+#[inline]
+pub fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
+    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
+}
+
 /// Target architecture for TLS calculations
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

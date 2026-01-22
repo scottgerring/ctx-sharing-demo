@@ -7,7 +7,148 @@ LABELS="dynamic"
 VALIDATE_MODE=""
 USE_EBPF=""
 
-# Parse arguments
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Get the binary name for a given labels/clib combination
+get_binary_name() {
+    local labels=$1
+    local clib=$2
+
+    if [[ "$labels" == "exhaust-static-tls" ]]; then
+        echo "simple-writer-exhaust-static-tls"
+    else
+        echo "simple-writer-${labels}-${clib}"
+    fi
+}
+
+# Check if a labels/clib combination is valid
+is_valid_combination() {
+    local labels=$1
+    local clib=$2
+
+    # Only static linking works with musl (context-reader can't resolve TLS for musl dlopen)
+    if [[ "$clib" == "musl" && "$labels" != "static" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Build all components for a given variant
+build_variant() {
+    local labels=$1
+    local clib=$2
+    local use_ebpf=$3
+    local binary=$(get_binary_name "$labels" "$clib")
+
+    # Build custom-labels library
+    cd custom-labels
+    if [[ "$labels" == "static" ]]; then
+        make libcustomlabels.a >/dev/null 2>&1
+    else
+        make libcustomlabels.so >/dev/null 2>&1
+    fi
+    cd ..
+
+    # Build tls-filler library if needed
+    if [[ "$labels" == "exhaust-static-tls" ]]; then
+        cd tls-filler
+        make >/dev/null 2>&1
+        cd ..
+    fi
+
+    # Build simple-writer
+    cd simple-writer
+    make "$binary" >/dev/null 2>&1
+    cd ..
+
+    # Build context-reader
+    cd context-reader
+    if [[ "$use_ebpf" == "yes" ]]; then
+        cargo xtask build >/dev/null 2>&1
+    else
+        cargo build >/dev/null 2>&1
+    fi
+    cd ..
+}
+
+# Run the validation test for a variant
+run_validation() {
+    local labels=$1
+    local clib=$2
+    local use_ebpf=$3
+    local binary=$(get_binary_name "$labels" "$clib")
+    local binary_path="simple-writer/build/$binary"
+    local mode_flag=""
+
+    if [[ "$use_ebpf" == "yes" ]]; then
+        mode_flag="--mode ebpf"
+    fi
+
+    # Start simple-writer
+    "$binary_path" &
+    local writer_pid=$!
+    sleep 2
+
+    # Check if process is still running
+    if ! kill -0 "$writer_pid" 2>/dev/null; then
+        echo "ERROR: simple-writer exited prematurely"
+        return 1
+    fi
+
+    # Run context-reader in validate mode
+    local result=0
+    cd context-reader
+    if sudo env RUST_LOG=info target/debug/validate "$writer_pid" --interval 500 --timeout 15 $mode_flag; then
+        result=0
+    else
+        result=1
+    fi
+    cd ..
+
+    # Cleanup
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+
+    return $result
+}
+
+# Run interactive mode (continuous monitoring)
+run_interactive() {
+    local labels=$1
+    local clib=$2
+    local use_ebpf=$3
+    local binary=$(get_binary_name "$labels" "$clib")
+    local binary_path="simple-writer/build/$binary"
+    local mode_flag=""
+
+    if [[ "$use_ebpf" == "yes" ]]; then
+        mode_flag="--mode ebpf"
+    fi
+
+    # Start simple-writer
+    echo "Starting simple-writer..."
+    "$binary_path" &
+    local writer_pid=$!
+    echo "  simple-writer started with PID: $writer_pid"
+    echo ""
+
+    echo "Waiting for simple-writer to initialize..."
+    sleep 2
+    echo ""
+
+    # Run context-reader
+    echo "Starting context-reader to monitor PID $writer_pid${use_ebpf:+ (eBPF mode)}..."
+    cd context-reader
+    sudo env RUST_LOG=debug target/debug/tail "$writer_pid" --interval 1000 $mode_flag
+    cd ..
+}
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --clib)
@@ -54,138 +195,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Function to run a single variant
-run_variant() {
-    local labels=$1
-    local clib=$2
-    local validate=$3
-    local use_ebpf=$4
+# ============================================================================
+# Main Execution
+# ============================================================================
 
-    # Check for invalid combinations
-    if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
-        echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
-        return 1
-    fi
-    if [[ "$labels" == "exhaust-static-tls" && "$clib" == "musl" ]]; then
-        echo "ERROR: exhaust-static-tls + musl is not supported"
-        return 1
-    fi
-
-    # Set binary name
-    if [[ "$labels" == "dlopen" ]]; then
-        binary="simple-writer-dlopen-glibc"
-    elif [[ "$labels" == "exhaust-static-tls" ]]; then
-        binary="simple-writer-exhaust-static-tls"
-    else
-        binary="simple-writer-${labels}-${clib}"
-    fi
-
-    echo "========================================"
-    echo "Testing: $binary"
-    echo "Configuration: custom-labels=${labels}, libc=${clib}"
-    echo "========================================"
-
-    # Set logging levels - reduce noise
-    export RUST_LOG="warn"
-
-    # Step 1: Build custom-labels library
-    echo "Building custom-labels library..."
-    cd custom-labels
-
-    if [[ "$labels" == "static" ]]; then
-        make libcustomlabels.a >/dev/null 2>&1
-    else
-        make libcustomlabels.so >/dev/null 2>&1
-    fi
-
-    cd ..
-
-    # Build tls-filler library if needed
-    if [[ "$labels" == "exhaust-static-tls" ]]; then
-        echo "Building tls-filler library..."
-        cd tls-filler
-        make >/dev/null 2>&1
-        cd ..
-    fi
-
-    # Step 2: Build simple-writer
-    echo "Building simple-writer variant..."
-    cd simple-writer
-    make "$binary" >/dev/null 2>&1
-    cd ..
-
-    # Step 3: Verify binary exists
-    binary_path="simple-writer/build/$binary"
-    if [[ ! -f "$binary_path" ]]; then
-        echo "ERROR: Binary not found at $binary_path"
-        return 1
-    fi
-
-    # Step 4: Build context-reader (always rebuild to pick up changes)
-    if [[ "$use_ebpf" == "yes" ]]; then
-        echo "Building context-reader with eBPF support..."
-        cd context-reader
-        cargo xtask build >/dev/null 2>&1
-        cd ..
-    else
-        echo "Building context-reader..."
-        cd context-reader
-        cargo build >/dev/null 2>&1
-        cd ..
-    fi
-
-    # Step 5: Start simple-writer
-    echo "Starting simple-writer..."
-    "$binary_path" &
-    writer_pid=$!
-
-    # Give simple-writer a moment to initialize
-    sleep 2
-
-    # Check if process is still running
-    if ! kill -0 "$writer_pid" 2>/dev/null; then
-        echo "ERROR: simple-writer exited prematurely"
-        return 1
-    fi
-
-    # Step 6: Run context-reader
-    local result=0
-    local mode_flag=""
-    if [[ "$use_ebpf" == "yes" ]]; then
-        mode_flag="--mode ebpf"
-    fi
-
-    if [[ "$validate" == "yes" ]]; then
-        echo "Running context-reader in validate mode${use_ebpf:+ (eBPF)}..."
-	cd context-reader
-        if sudo env RUST_LOG=info target/debug/context-reader "$writer_pid" --interval 500 --validate-only --timeout 15 $mode_flag; then
-            echo "PASS: $binary"
-            result=0
-        else
-            echo "FAIL: $binary"
-            result=1
-        fi
-	cd ..
-    else
-        echo "Starting context-reader to monitor PID $writer_pid${use_ebpf:+ (eBPF)}..."
-        sudo env RUST_LOG=debug ./context-reader/target/debug/context-reader "$writer_pid" --interval 1000 $mode_flag
-        result=$?
-    fi
-
-    # Cleanup
-    kill "$writer_pid" 2>/dev/null || true
-    wait "$writer_pid" 2>/dev/null || true
-
-    echo ""
-    return $result
-}
+export RUST_LOG="warn"
 
 # Validate-all mode: test all combinations
 if [[ "$VALIDATE_MODE" == "all" ]]; then
     echo "Running validation for all simple-writer variants..."
     echo ""
 
-    # Clean build directories to ensure fresh builds for each variant
+    # Clean build directories
     echo "Cleaning build directories..."
     rm -rf simple-writer/build
     mkdir -p simple-writer/build
@@ -212,35 +233,34 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
     for labels in static dynamic dlopen exhaust-static-tls; do
         for clib in glibc musl; do
             # Skip invalid combinations
-            if [[ "$labels" == "dynamic" && "$clib" == "musl" ]]; then
-                continue
-            fi
-            if [[ "$labels" == "exhaust-static-tls" && "$clib" == "musl" ]]; then
+            if ! is_valid_combination "$labels" "$clib"; then
                 continue
             fi
 
-            # Clean and rebuild for this combination
+            binary=$(get_binary_name "$labels" "$clib")
+            echo "========================================"
+            echo "Testing: $binary"
+            echo "========================================"
+
+            # Clean and rebuild custom-labels for this combination
             cd custom-labels && make clean >/dev/null 2>&1 && cd ..
 
-            if run_variant "$labels" "$clib" "yes" "$USE_EBPF"; then
+            # Build variant
+            echo "Building..."
+            build_variant "$labels" "$clib" "$USE_EBPF"
+
+            # Run validation
+            echo "Validating${USE_EBPF:+ (eBPF)}..."
+            if run_validation "$labels" "$clib" "$USE_EBPF"; then
+                echo "PASS: $binary"
                 passed=$((passed + 1))
-                if [[ "$labels" == "dlopen" ]]; then
-                    results="${results}PASS: simple-writer-dlopen-glibc\n"
-                elif [[ "$labels" == "exhaust-static-tls" ]]; then
-                    results="${results}PASS: simple-writer-exhaust-static-tls\n"
-                else
-                    results="${results}PASS: simple-writer-${labels}-${clib}\n"
-                fi
+                results="${results}PASS: $binary\n"
             else
+                echo "FAIL: $binary"
                 failed=$((failed + 1))
-                if [[ "$labels" == "dlopen" ]]; then
-                    results="${results}FAIL: simple-writer-dlopen-glibc\n"
-                elif [[ "$labels" == "exhaust-static-tls" ]]; then
-                    results="${results}FAIL: simple-writer-exhaust-static-tls\n"
-                else
-                    results="${results}FAIL: simple-writer-${labels}-${clib}\n"
-                fi
+                results="${results}FAIL: $binary\n"
             fi
+            echo ""
         done
     done
 
@@ -262,127 +282,53 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
     fi
 fi
 
-# Single variant mode
-if [[ "$VALIDATE_MODE" == "single" ]]; then
-    run_variant "$LABELS" "$CLIB" "yes" "$USE_EBPF"
-    exit $?
-fi
-
-# Normal interactive mode
-# Check for invalid combinations
-if [[ "$LABELS" == "dynamic" && "$CLIB" == "musl" ]]; then
-    echo "ERROR: dynamic + musl is not supported (musl builds are static, cannot link .so)"
-    exit 1
-fi
-if [[ "$LABELS" == "exhaust-static-tls" && "$CLIB" == "musl" ]]; then
-    echo "ERROR: exhaust-static-tls + musl is not supported"
+# Single variant mode (validate or interactive)
+# Validate combination
+if ! is_valid_combination "$LABELS" "$CLIB"; then
+    echo "ERROR: $LABELS + $CLIB is not supported"
     exit 1
 fi
 
-# Set binary name
-if [[ "$LABELS" == "dlopen" ]]; then
-    BINARY="simple-writer-dlopen-glibc"
-elif [[ "$LABELS" == "exhaust-static-tls" ]]; then
-    BINARY="simple-writer-exhaust-static-tls"
-else
-    BINARY="simple-writer-${LABELS}-${CLIB}"
-fi
+BINARY=$(get_binary_name "$LABELS" "$CLIB")
 
 echo "Building and running: $BINARY"
 echo "Configuration: custom-labels=${LABELS}, libc=${CLIB}"
 echo ""
 
-# Set logging levels - reduce noise
-export RUST_LOG="warn"
-
-# Step 1: Build custom-labels library
-echo "Step 1: Building custom-labels library..."
-cd custom-labels
-
-if [[ "$LABELS" == "static" ]]; then
-    echo "  Building static library (libcustomlabels.a)..."
-    make libcustomlabels.a
-else
-    # Both dynamic, dlopen, and exhaust-static-tls variants need the shared library
-    echo "  Building shared library (libcustomlabels.so)..."
-    make libcustomlabels.so
-fi
-
-cd ..
-
-# Build tls-filler library if needed
-if [[ "$LABELS" == "exhaust-static-tls" ]]; then
-    echo "Step 1b: Building tls-filler library..."
-    cd tls-filler
-    make
-    cd ..
-fi
+# Build everything
+echo "Step 1: Building components..."
+build_variant "$LABELS" "$CLIB" "$USE_EBPF"
 echo ""
 
-# Step 2: Build simple-writer
-echo "Step 2: Building simple-writer variant..."
-cd simple-writer
-make "$BINARY"
-cd ..
-echo ""
-
-# Step 3: Verify binary
-echo "Step 3: Verifying binary..."
+# Verify binary
 BINARY_PATH="simple-writer/build/$BINARY"
-
 if [[ ! -f "$BINARY_PATH" ]]; then
     echo "ERROR: Binary not found at $BINARY_PATH"
     exit 1
 fi
 
+echo "Step 2: Verifying binary..."
 echo "  Binary type:"
 file "$BINARY_PATH" | sed 's/^/    /'
-
 echo "  Dynamic dependencies:"
 if ldd "$BINARY_PATH" 2>/dev/null; then
     ldd "$BINARY_PATH" | sed 's/^/    /'
 else
     echo "    (static binary - no dynamic dependencies)"
 fi
+echo ""
 
-echo "  Custom labels symbols:"
-if nm -D "$BINARY_PATH" 2>/dev/null | grep custom_labels; then
-    nm -D "$BINARY_PATH" | grep custom_labels | sed 's/^/    /'
+# Run in validate or interactive mode
+if [[ "$VALIDATE_MODE" == "single" ]]; then
+    echo "Step 3: Running validation${USE_EBPF:+ (eBPF mode)}..."
+    if run_validation "$LABELS" "$CLIB" "$USE_EBPF"; then
+        echo "PASS: $BINARY"
+        exit 0
+    else
+        echo "FAIL: $BINARY"
+        exit 1
+    fi
 else
-    echo "    Checking static symbols..."
-    nm "$BINARY_PATH" | grep custom_labels | sed 's/^/    /'
+    echo "Step 3: Running interactively${USE_EBPF:+ (eBPF mode)}..."
+    run_interactive "$LABELS" "$CLIB" "$USE_EBPF"
 fi
-echo ""
-
-# Step 4: Build context-reader
-echo "Step 4: Building context-reader${USE_EBPF:+ with eBPF support}..."
-cd context-reader
-if [[ "$USE_EBPF" == "yes" ]]; then
-    cargo xtask build
-else
-    cargo build
-fi
-cd ..
-echo ""
-
-# Step 5: Start simple-writer
-echo "Step 5: Starting simple-writer..."
-"$BINARY_PATH" &
-WRITER_PID=$!
-echo "  simple-writer started with PID: $WRITER_PID"
-echo ""
-
-# Give simple-writer a moment to initialize
-echo "Waiting for simple-writer to initialize..."
-sleep 2
-echo ""
-
-# Step 6: Run context-reader
-MODE_FLAG=""
-if [[ "$USE_EBPF" == "yes" ]]; then
-    MODE_FLAG="--mode ebpf"
-fi
-echo "Step 6: Starting context-reader to monitor PID $WRITER_PID${USE_EBPF:+ (eBPF mode)}..."
-cd context-reader
-sudo env RUST_LOG=debug target/debug/context-reader "$WRITER_PID" --interval 1000 $MODE_FLAG
-cd ..

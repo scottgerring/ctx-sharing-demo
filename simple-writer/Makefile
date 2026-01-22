@@ -28,8 +28,9 @@ PROCESS_CTX_SRC = process_context.c
 
 # All targets
 TARGETS = simple-writer-static-musl simple-writer-static-glibc \
-          simple-writer-dynamic-musl simple-writer-dynamic-glibc \
-          simple-writer-dlopen-glibc simple-writer-exhaust-static-tls
+          simple-writer-dynamic-glibc \
+          simple-writer-dlopen-glibc \
+          simple-writer-exhaust-static-tls
 
 .PHONY: all clean $(TARGETS)
 
@@ -60,16 +61,7 @@ simple-writer-static-glibc: $(BUILD_DIR)/process_context-glibc.o
 		../custom-labels/libcustomlabels.a \
 		$(EXPORT_SYMBOLS)
 
-# Variant 3: Dynamic labels + musl (static musl, dynamic custom-labels)
-simple-writer-dynamic-musl: $(BUILD_DIR)/process_context-musl.o
-	musl-gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
-		-static \
-		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-musl.o \
-		-L../custom-labels -lcustomlabels \
-		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
-		$(EXPORT_SYMBOLS)
-
-# Variant 4: Dynamic labels + glibc (fully dynamic)
+# Variant 3: Dynamic labels + glibc (fully dynamic)
 simple-writer-dynamic-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-glibc.o \
@@ -77,7 +69,7 @@ simple-writer-dynamic-glibc: $(BUILD_DIR)/process_context-glibc.o
 		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
 		$(EXPORT_SYMBOLS)
 
-# Variant 5: dlopen + glibc (load library at runtime with dlopen)
+# Variant 4: dlopen + glibc (load library at runtime with dlopen)
 simple-writer-dlopen-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-o $(BUILD_DIR)/$@ $(DLOPEN_SRC) $(BUILD_DIR)/process_context-glibc.o \

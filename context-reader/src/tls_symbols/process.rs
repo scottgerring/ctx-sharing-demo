@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use context_reader_common::is_valid_static_tls_offset;
 use procfs::process::{MMapPath, Process};
 use std::path::PathBuf;
 use tracing::{debug, info};
@@ -6,17 +7,6 @@ use tracing::{debug, info};
 use super::dynamic_linker;
 use super::elf_reader::{find_tlsdesc_relocation, resolve_tlsdesc_offset, SymbolInfo};
 use super::tls_accessor::{TlsDescInfo, TlsLocation};
-
-/// Check if a tls_offset value is valid for static TLS calculation.
-/// Set FORCE_DTV=1 to force DTV lookup (for testing).
-fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
-    // Allow forcing DTV path for testing
-    if std::env::var("FORCE_DTV").is_ok() {
-        return false;
-    }
-    const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
-    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
-}
 
 /// Information about a TLS symbol found in a loaded binary (executable or shared library)
 #[derive(Debug, Clone)]

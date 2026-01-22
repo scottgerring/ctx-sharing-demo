@@ -8,6 +8,22 @@ name = "context-reader"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "context_reader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dump-symbols"
+path = "src/bin/dump-symbols.rs"
+
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+
+[[bin]]
+name = "tail"
+path = "src/bin/tail.rs"
+
 [dependencies]
 goblin = "0.9"
 anyhow = "1.0"

@@ -4,6 +4,7 @@
 /// specific application logic.
 ///
 use anyhow::{Context, Result};
+use context_reader_common::is_valid_static_tls_offset;
 use tracing::{debug, info};
 
 use super::memory::read_memory;
@@ -26,9 +27,6 @@ pub enum TlsLocation {
         /// Optional TLSDESC info for DTV lookup when static TLS unavailable
         tlsdesc: Option<TlsDescInfo>,
     },
-    /// TLS via static offset from thread pointer (legacy, prefer SharedLibrary)
-    /// This is used when module_id is 0 but tls_offset is valid
-    StaticTls { tls_offset: usize, symbol_offset: usize },
 }
 
 /// Information needed to resolve TLS via TLSDESC mechanism
@@ -65,9 +63,6 @@ pub fn get_tls_variable_address_with_thread_pointer(
             // Try static TLS first (faster), then TLSDESC, finally DTV
             get_tls_for_shared_library(pid, thread_pointer, *module_id, *offset, *tls_offset, tlsdesc.as_ref())
         }
-        TlsLocation::StaticTls { tls_offset, symbol_offset } => {
-            get_tls_via_static_with_tp(thread_pointer, *tls_offset, *symbol_offset)
-        }
     }
 }
 
@@ -83,16 +78,6 @@ fn get_tls_via_static_offset_with_tp(thread_pointer: usize, tls_offset: usize) -
     );
 
     Ok(tls_addr as usize)
-}
-
-/// Check if a tls_offset value is valid for static TLS calculation.
-/// Invalid values include:
-/// - 0: No TLS offset set
-/// - usize::MAX: glibc marker for "use DTV" (dynamic TLS only)
-/// - Values > 1GB: Likely invalid pointers, not offsets
-fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
-    const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
-    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
 }
 
 /// Get TLS address for shared library using resolution order: static → TLSDESC → DTV.

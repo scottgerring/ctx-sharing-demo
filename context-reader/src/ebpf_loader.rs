@@ -11,7 +11,7 @@ use aya::{
     Ebpf,
 };
 use aya_log::EbpfLogger;
-use context_reader_common::{KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
+use context_reader_common::{is_valid_static_tls_offset, KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
 use custom_labels::process_context;
 use custom_labels::v2::process_context_ext::TlsConfig as V2TlsConfigExt;
 use std::time::Duration;
@@ -433,13 +433,6 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
     Ok(())
 }
 
-/// Check if a tls_offset value is valid for static TLS calculation.
-/// This mirrors the check in tls_accessor.rs.
-fn is_valid_static_tls_offset(tls_offset: usize) -> bool {
-    const MAX_REASONABLE_TLS_OFFSET: usize = 0x40000000; // 1GB
-    tls_offset != 0 && tls_offset != usize::MAX && tls_offset <= MAX_REASONABLE_TLS_OFFSET
-}
-
 /// Convert TlsLocation to TlsConfig for BPF map
 fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsConfig {
     match location {
@@ -465,16 +458,6 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
                 _pad: [0; 6],
                 max_record_size,
             }
-        },
-        TlsLocation::StaticTls { tls_offset, symbol_offset } => TlsConfig {
-            // For static TLS, we always use static TLS path
-            module_id: 0,
-            offset: *symbol_offset as u64,
-            tls_offset: *tls_offset as u64,
-            is_main_executable: 0,
-            use_static_tls: 1,  // Always use static TLS for this variant
-            _pad: [0; 6],
-            max_record_size,
         },
     }
 }
@@ -559,85 +542,6 @@ fn parse_v1_packed_labels(data: &[u8]) -> Result<Vec<Label>> {
     }
 
     Ok(labels)
-}
-
-/// Read V1 labels by chasing pointers from the storage array
-fn read_v1_labels_from_storage(pid: i32, storage_ptr: usize, count: usize) -> Result<Vec<Label>> {
-    use crate::tls_symbols::memory::read_memory;
-
-    // V1 label structure: { key: { len, buf }, value: { len, buf } }
-    // Each string is 16 bytes (len: usize, buf: *const u8)
-    // Each label is 32 bytes
-    const LABEL_SIZE: usize = 32;
-
-    if count > 100 {
-        anyhow::bail!("Unreasonable label count: {}", count);
-    }
-
-    let mut buffer = vec![0u8; LABEL_SIZE * count];
-    read_memory(pid, storage_ptr, &mut buffer)?;
-
-    let mut labels = Vec::new();
-
-    for i in 0..count {
-        let offset = i * LABEL_SIZE;
-
-        // Key string: len at offset+0, buf at offset+8
-        let key_len = usize::from_ne_bytes(buffer[offset..offset + 8].try_into()?);
-        let key_buf = usize::from_ne_bytes(buffer[offset + 8..offset + 16].try_into()?);
-
-        // Value string: len at offset+16, buf at offset+24
-        let val_len = usize::from_ne_bytes(buffer[offset + 16..offset + 24].try_into()?);
-        let val_buf = usize::from_ne_bytes(buffer[offset + 24..offset + 32].try_into()?);
-
-        if key_buf == 0 {
-            continue;
-        }
-
-        // Read key string
-        let key = read_string_from_process(pid, key_buf, key_len)?;
-
-        // Read value (as bytes or string depending on key)
-        let value = if matches!(key.as_str(), "trace_id" | "span_id" | "local_root_span_id") {
-            let bytes = read_bytes_from_process(pid, val_buf, val_len)?;
-            LabelValue::Bytes(bytes)
-        } else {
-            let text = read_string_from_process(pid, val_buf, val_len)?;
-            LabelValue::Text(text)
-        };
-
-        labels.push(Label { key, value });
-    }
-
-    Ok(labels)
-}
-
-/// Read a string from target process memory
-fn read_string_from_process(pid: i32, addr: usize, len: usize) -> Result<String> {
-    use crate::tls_symbols::memory::read_memory;
-
-    if addr == 0 || len == 0 {
-        return Ok(String::new());
-    }
-
-    let mut buffer = vec![0u8; len];
-    read_memory(pid, addr, &mut buffer)?;
-
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
-}
-
-/// Read bytes from target process memory
-fn read_bytes_from_process(pid: i32, addr: usize, len: usize) -> Result<Vec<u8>> {
-    use crate::tls_symbols::memory::read_memory;
-
-    if addr == 0 || len == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut buffer = vec![0u8; len];
-    read_memory(pid, addr, &mut buffer)?;
-
-    Ok(buffer)
 }
 
 /// Process a V2 format event

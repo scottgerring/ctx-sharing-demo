@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <libgen.h>
-#include <linux/limits.h>
+#include <limits.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include "customlabels_v2.h"
