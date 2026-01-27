@@ -3,7 +3,9 @@
 
 use aya_ebpf::{
     bindings::bpf_perf_event_data,
-    helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_probe_read_kernel, bpf_probe_read_user},
+    helpers::{
+        bpf_get_current_pid_tgid, bpf_get_current_task, bpf_probe_read_kernel, bpf_probe_read_user,
+    },
     macros::{map, perf_event},
     maps::{HashMap, RingBuf},
     programs::PerfEventContext,
@@ -142,10 +144,19 @@ fn get_thread_pointer_and_arch() -> Result<(u64, Architecture), i64> {
 /// Calculate static TLS address for shared libraries.
 /// Uses l_tls_offset from link_map for direct thread pointer arithmetic.
 #[inline(always)]
-fn calculate_shared_lib_static_tls(thread_pointer: u64, tls_offset: u64, symbol_offset: u64, arch: Architecture) -> u64 {
+fn calculate_shared_lib_static_tls(
+    thread_pointer: u64,
+    tls_offset: u64,
+    symbol_offset: u64,
+    arch: Architecture,
+) -> u64 {
     match arch {
-        Architecture::X86_64 => thread_pointer.wrapping_sub(tls_offset).wrapping_add(symbol_offset),
-        Architecture::Aarch64 => thread_pointer.wrapping_add(tls_offset).wrapping_add(symbol_offset),
+        Architecture::X86_64 => thread_pointer
+            .wrapping_sub(tls_offset)
+            .wrapping_add(symbol_offset),
+        Architecture::Aarch64 => thread_pointer
+            .wrapping_add(tls_offset)
+            .wrapping_add(symbol_offset),
     }
 }
 
@@ -159,7 +170,11 @@ fn is_valid_static_tls_offset(tls_offset: u64) -> bool {
 /// Compute TLS variable address from thread pointer and config.
 /// For shared libraries, userspace tells us whether to use static TLS (fast) or DTV (safe).
 #[inline(always)]
-fn compute_tls_address(thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<u64, i64> {
+fn compute_tls_address(
+    thread_pointer: u64,
+    config: &TlsConfig,
+    arch: Architecture,
+) -> Result<u64, i64> {
     if config.is_main_executable != 0 {
         // Main executable: use static TLS calculation
         Ok(calculate_static_tls_address(
@@ -177,20 +192,30 @@ fn compute_tls_address(thread_pointer: u64, config: &TlsConfig, arch: Architectu
         ))
     } else {
         // Shared library without valid tls_offset: use DTV lookup
-        compute_tls_via_dtv(thread_pointer, config)
+        compute_tls_via_dtv(thread_pointer, config, arch)
     }
 }
 
 /// Compute TLS address via DTV lookup (fallback for dlopen'd libraries).
 #[inline(always)]
-fn compute_tls_via_dtv(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i64> {
-    // DTV pointer location varies by architecture:
-    // - x86_64: at thread_pointer + 8 (second field in tcbhead_t)
-    // - aarch64: at thread_pointer + 0 (first field in tcbhead_t)
-    // For simplicity, we read from offset 0 which works for aarch64
-    // and is close enough for x86_64 (the DTV is nearby in the TCB)
+fn compute_tls_via_dtv(
+    thread_pointer: u64,
+    config: &TlsConfig,
+    arch: Architecture,
+) -> Result<u64, i64> {
+    // DTV pointer location varies by architecture due to different tcbhead_t layouts:
+    //
+    // glibc x86-64
+    //   DTV is at offset 8 (second field)
+    //
+    // glibc aarch64
+    //   DTV is at offset 0 (first field)
+    let dtv_offset: u64 = match arch {
+        Architecture::X86_64 => 8,
+        Architecture::Aarch64 => 0,
+    };
     let dtv_ptr: u64 = unsafe {
-        bpf_probe_read_user(thread_pointer as *const u64).map_err(|e| e as i64)?
+        bpf_probe_read_user((thread_pointer + dtv_offset) as *const u64).map_err(|e| e as i64)?
     };
 
     if dtv_ptr == 0 {
@@ -202,9 +227,8 @@ fn compute_tls_via_dtv(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i
     let dtv_entry_addr = dtv_ptr + (config.module_id * DTV_ENTRY_SIZE);
 
     // Read TLS block pointer from DTV entry
-    let tls_block: u64 = unsafe {
-        bpf_probe_read_user(dtv_entry_addr as *const u64).map_err(|e| e as i64)?
-    };
+    let tls_block: u64 =
+        unsafe { bpf_probe_read_user(dtv_entry_addr as *const u64).map_err(|e| e as i64)? };
 
     // Check for unallocated marker (-1)
     if tls_block == u64::MAX || tls_block == 0 {
@@ -227,7 +251,13 @@ fn compute_tls_via_dtv(thread_pointer: u64, config: &TlsConfig) -> Result<u64, i
 /// ```
 /// All the work is done here in kernel space, so userspace just needs to unpack the data.
 #[inline(always)]
-fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<(), i64> {
+fn read_and_emit_v1(
+    ctx: &PerfEventContext,
+    tid: u32,
+    thread_pointer: u64,
+    config: &TlsConfig,
+    arch: Architecture,
+) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v1: tid={}", tid);
 
     let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
@@ -235,9 +265,8 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
     let tls_addr = compute_tls_address(thread_pointer, config, arch)?;
 
     // Read pointer to labelset
-    let labelset_ptr: u64 = unsafe {
-        bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)?
-    };
+    let labelset_ptr: u64 =
+        unsafe { bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)? };
 
     if labelset_ptr == 0 {
         return Ok(()); // No labels set
@@ -284,18 +313,14 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
         let label_addr = storage_ptr + (index as u64 * 32);
 
         // Read label structure: [key_len, key_buf, value_len, value_buf]
-        let key_len: u64 = unsafe {
-            bpf_probe_read_user(label_addr as *const u64).map_err(|e| e as i64)?
-        };
-        let key_buf: u64 = unsafe {
-            bpf_probe_read_user((label_addr + 8) as *const u64).map_err(|e| e as i64)?
-        };
-        let value_len: u64 = unsafe {
-            bpf_probe_read_user((label_addr + 16) as *const u64).map_err(|e| e as i64)?
-        };
-        let value_buf: u64 = unsafe {
-            bpf_probe_read_user((label_addr + 24) as *const u64).map_err(|e| e as i64)?
-        };
+        let key_len: u64 =
+            unsafe { bpf_probe_read_user(label_addr as *const u64).map_err(|e| e as i64)? };
+        let key_buf: u64 =
+            unsafe { bpf_probe_read_user((label_addr + 8) as *const u64).map_err(|e| e as i64)? };
+        let value_len: u64 =
+            unsafe { bpf_probe_read_user((label_addr + 16) as *const u64).map_err(|e| e as i64)? };
+        let value_buf: u64 =
+            unsafe { bpf_probe_read_user((label_addr + 24) as *const u64).map_err(|e| e as i64)? };
 
         // Limit string sizes to ensure we fit in MAX_LABEL_DATA_SIZE (1024 bytes)
         // With MAX_STRING_LEN=32 and MAX_LABELS=8:
@@ -352,14 +377,28 @@ fn read_and_emit_v1(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
     let end_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
     // Emit the packed label data
-    emit_event(ctx, tid, 1, &scratch[..write_pos], labelset_ptr, start_time, end_time)?;
+    emit_event(
+        ctx,
+        tid,
+        1,
+        &scratch[..write_pos],
+        labelset_ptr,
+        start_time,
+        end_time,
+    )?;
 
     Ok(())
 }
 
 /// Read V2 format labels and emit to ringbuf
 #[inline(always)]
-fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, config: &TlsConfig, arch: Architecture) -> Result<(), i64> {
+fn read_and_emit_v2(
+    ctx: &PerfEventContext,
+    tid: u32,
+    thread_pointer: u64,
+    config: &TlsConfig,
+    arch: Architecture,
+) -> Result<(), i64> {
     debug!(ctx, "read_and_emit_v2: tid={}", tid);
 
     let start_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
@@ -367,9 +406,8 @@ fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
     let tls_addr = compute_tls_address(thread_pointer, config, arch)?;
 
     // Read pointer to v2 record
-    let record_ptr: u64 = unsafe {
-        bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)?
-    };
+    let record_ptr: u64 =
+        unsafe { bpf_probe_read_user(tls_addr as *const u64).map_err(|e| e as i64)? };
 
     if record_ptr == 0 {
         return Ok(()); // No record set
@@ -388,14 +426,30 @@ fn read_and_emit_v2(ctx: &PerfEventContext, tid: u32, thread_pointer: u64, confi
 
     let end_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
-    emit_event(ctx, tid, 2, &scratch[..read_size], record_ptr, start_time, end_time)?;
+    emit_event(
+        ctx,
+        tid,
+        2,
+        &scratch[..read_size],
+        record_ptr,
+        start_time,
+        end_time,
+    )?;
 
     Ok(())
 }
 
 /// Emit a label event to the ring buffer
 #[inline(always)]
-fn emit_event(ctx: &PerfEventContext, tid: u32, format_version: u8, data: &[u8], ptr: u64, start_time_ns: u64, end_time_ns: u64) -> Result<(), i64> {
+fn emit_event(
+    ctx: &PerfEventContext,
+    tid: u32,
+    format_version: u8,
+    data: &[u8],
+    ptr: u64,
+    start_time_ns: u64,
+    end_time_ns: u64,
+) -> Result<(), i64> {
     let mut buf = EVENTS.reserve::<LabelEvent>(0).ok_or(-10)?;
 
     let event = unsafe { &mut *buf.as_mut_ptr() };
