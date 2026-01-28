@@ -531,7 +531,7 @@ fn parse_v1_packed_labels(data: &[u8]) -> Result<Vec<Label>> {
             anyhow::bail!("Truncated value data at position {}", pos);
         }
 
-        let value = if matches!(key.as_str(), "trace_id" | "span_id" | "local_root_span_id") {
+        let value = if matches!(key.as_str(), "trace_id" | "span_id") {
             LabelValue::Bytes(data[pos..pos + value_len].to_vec())
         } else {
             LabelValue::Text(String::from_utf8_lossy(&data[pos..pos + value_len]).into_owned())
@@ -569,10 +569,6 @@ fn process_v2_event(event: &LabelEvent) -> ThreadResult {
             labels.push(Label {
                 key: "span_id".to_string(),
                 value: LabelValue::Bytes(record.span_id.to_vec()),
-            });
-            labels.push(Label {
-                key: "local_root_span_id".to_string(),
-                value: LabelValue::Bytes(record.root_span_id.to_vec()),
             });
 
             // Attributes

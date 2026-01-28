@@ -88,6 +88,13 @@ fn encode_anyvalue(value: &Value) -> Vec<u8> {
             write_tag_varint(&mut buf, 3);
             write_varint_i64(&mut buf, *i);
         }
+        Value::Array(values) => {
+            // array_value = field 5, wire type LEN
+            let array_bytes = encode_arrayvalue(values);
+            write_tag_len(&mut buf, 5);
+            write_varint(&mut buf, array_bytes.len() as u16);
+            buf.extend(array_bytes);
+        }
         Value::KvList(kvs) => {
             // kvlist_value = field 6, wire type LEN
             let kvlist_bytes = encode_kvlist(kvs);
@@ -95,6 +102,19 @@ fn encode_anyvalue(value: &Value) -> Vec<u8> {
             write_varint(&mut buf, kvlist_bytes.len() as u16);
             buf.extend(kvlist_bytes);
         }
+    }
+    buf
+}
+
+/// Encode an ArrayValue message to bytes
+fn encode_arrayvalue(values: &[Value]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for val in values {
+        // ArrayValue.values = field 1, wire type LEN
+        let val_bytes = encode_anyvalue(val);
+        write_tag_len(&mut buf, 1);
+        write_varint(&mut buf, val_bytes.len() as u16);
+        buf.extend(val_bytes);
     }
     buf
 }
@@ -145,6 +165,11 @@ fn validate_value(key: &str, value: &Value) -> Result<()> {
             }
         }
         Value::Int(_) => {}
+        Value::Array(values) => {
+            for val in values {
+                validate_value(key, val)?;
+            }
+        }
         Value::KvList(kvs) => {
             for kv in kvs {
                 validate_kv(kv)?;
@@ -299,6 +324,11 @@ fn decode_anyvalue(reader: &mut Reader, len: usize) -> Result<Value> {
             // int_value
             Value::Int(reader.read_varint_u64()? as i64)
         }
+        (5, WIRE_TYPE_LEN) => {
+            // array_value
+            let array_len = reader.read_varint()? as usize;
+            Value::Array(decode_arrayvalue(reader, array_len)?)
+        }
         (6, WIRE_TYPE_LEN) => {
             // kvlist_value
             let kvlist_len = reader.read_varint()? as usize;
@@ -333,6 +363,27 @@ fn decode_kvlist(reader: &mut Reader, len: usize) -> Result<Vec<KeyValue>> {
         let kv_len = reader.read_varint()? as usize;
         let kv = decode_keyvalue(reader, kv_len)?;
         result.push(kv);
+    }
+
+    Ok(result)
+}
+
+/// Decode an ArrayValue message
+fn decode_arrayvalue(reader: &mut Reader, len: usize) -> Result<Vec<Value>> {
+    let end = reader.pos + len;
+    let mut result = Vec::new();
+
+    while reader.pos < end {
+        let (field_number, wire_type) = reader.read_tag_full()?;
+        if field_number != 1 || wire_type != WIRE_TYPE_LEN {
+            return Err(Error::DecodingFailed(format!(
+                "expected ArrayValue.values field, got field {} wire_type {}",
+                field_number, wire_type
+            )));
+        }
+        let val_len = reader.read_varint()? as usize;
+        let val = decode_anyvalue(reader, val_len)?;
+        result.push(val);
     }
 
     Ok(result)
@@ -450,18 +501,34 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_array() {
+        let ctx = ProcessContext::new().with_resource(
+            "threadlocal.attribute_key_map",
+            Value::Array(vec![
+                Value::String("http_route".to_string()),
+                Value::String("http_method".to_string()),
+                Value::String("user_id".to_string()),
+            ]),
+        );
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
     fn test_roundtrip_full_threadlocal_config() {
+        // Updated to use the new spec format: schema_version as string, key_map as array
         let ctx = ProcessContext::new()
             .with_resource("service.name", "test-service")
-            .with_resource("threadlocal.schema_type", "tlsdesc")
-            .with_resource("threadlocal.schema_version", Value::Int(1))
+            .with_resource("threadlocal.schema_version", "tlsdesc_v1_dev")
             .with_resource("threadlocal.max_record_size", Value::Int(64))
             .with_resource(
                 "threadlocal.attribute_key_map",
-                Value::KvList(vec![
-                    KeyValue::string("0", "http_route"),
-                    KeyValue::string("1", "http_method"),
-                    KeyValue::string("2", "user_id"),
+                Value::Array(vec![
+                    Value::String("http_route".to_string()),
+                    Value::String("http_method".to_string()),
+                    Value::String("user_id".to_string()),
                 ]),
             );
 

@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use super::{sys, Error, KeyHandle};
+use super::{sys, KeyHandle};
 use tracing::info;
 use crate::v2::error::{Error, Result};
 
@@ -28,18 +28,12 @@ impl RecordBuilder {
         }
     }
 
-    pub fn set_trace(
-        &mut self,
-        trace_id: &[u8; 16],
-        span_id: &[u8; 8],
-        root_span_id: &[u8; 8],
-    ) -> &mut Self {
+    pub fn set_trace(&mut self, trace_id: &[u8; 16], span_id: &[u8; 8]) -> &mut Self {
         unsafe {
             sys::custom_labels_v2_record_set_trace(
                 self.raw.as_ptr(),
                 trace_id.as_ptr(),
                 span_id.as_ptr(),
-                root_span_id.as_ptr(),
             )
         }
         self
@@ -243,20 +237,14 @@ where
 }
 
 /// Execute a function with trace context and attributes set.
-pub fn with_trace_and_attrs<I, V, F, R>(
-    trace_id: &[u8; 16],
-    span_id: &[u8; 8],
-    root_span_id: &[u8; 8],
-    attrs: I,
-    f: F,
-) -> R
+pub fn with_trace_and_attrs<I, V, F, R>(trace_id: &[u8; 16], span_id: &[u8; 8], attrs: I, f: F) -> R
 where
     I: IntoIterator<Item = (KeyHandle, V)>,
     V: AsRef<[u8]>,
     F: FnOnce() -> R,
 {
     let mut builder = RecordBuilder::new();
-    builder.set_trace(trace_id, span_id, root_span_id);
+    builder.set_trace(trace_id, span_id);
     for (key, value) in attrs {
         builder
             .set_attr(key, value.as_ref())

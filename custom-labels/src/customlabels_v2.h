@@ -21,13 +21,15 @@ typedef struct {
     // W3C trace context fields
     uint8_t trace_id[16];
     uint8_t span_id[8];
-    uint8_t root_span_id[8];
 
     // Readers should ignore this record if valid is 0
     uint8_t valid;
 
-    // Number of attributes in attrs_data
-    uint8_t attrs_count;
+    // Explicit padding for alignment of attrs_data_size
+    uint8_t _padding;
+
+    // Size of attrs_data in bytes (lets reader know when to stop parsing)
+    uint16_t attrs_data_size;
 
     // Attribute data; each attr is [key_index:1][length:1][value:length]
     // This is stored without padding to a constant length (like the key table)
@@ -54,8 +56,7 @@ void custom_labels_v2_record_free(custom_labels_v2_tl_record_t *record);
 void custom_labels_v2_record_set_trace(
     custom_labels_v2_tl_record_t *record,
     const uint8_t trace_id[16],
-    const uint8_t span_id[8],
-    const uint8_t root_span_id[8]
+    const uint8_t span_id[8]
 );
 
 // Add an attribute to a record. Returns 0 on success, -1 on error (e.g. buffer full)

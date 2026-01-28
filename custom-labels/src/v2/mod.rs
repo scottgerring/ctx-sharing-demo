@@ -1,5 +1,3 @@
-use thiserror::Error;
-
 /// A key handle representing an index into the external key table.
 /// The index must correspond to a key registered in the key table
 /// managed by the application (e.g., stored in process-context).

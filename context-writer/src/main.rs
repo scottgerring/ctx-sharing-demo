@@ -145,7 +145,6 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
         // Generate a fake span/trace ID
         let span_id = rng.r#gen::<u64>().to_be_bytes();
         let trace_id: [u8; 16] = rng.r#gen();
-        let root_span_id: [u8; 8] = rng.r#gen();
 
         request_count += 1;
 
@@ -168,7 +167,7 @@ fn worker_thread(thread_id: usize, running: Arc<AtomicBool>) {
         labelset.enter(|| {
             // Attach the context to TLS (v2 format)
             v2::writer::set_current_record(Some(&span_id), |builder| {
-                builder.set_trace(&trace_id, &span_id, &root_span_id);
+                builder.set_trace(&trace_id, &span_id);
                 builder.set_attr_str(method_key, method).unwrap();
                 builder.set_attr_str(route_key, route).unwrap();
                 builder.set_attr_str(user_key, user).unwrap();

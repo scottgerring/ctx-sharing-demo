@@ -24,12 +24,7 @@ const uint8_t SPAN_ID[8] = {
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
 };
 
-const uint8_t ROOT_SPAN_ID[8] = {
-    0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11
-};
-
-/* Key configuration */
-static const uint8_t KEY_INDICES[] = {METHOD_IDX, ROUTE_IDX, USER_IDX};
+/* Key configuration - position in array = key index */
 static const char *KEY_NAMES[] = {"method", "route", "user"};
 static const size_t KEY_COUNT = 3;
 
@@ -102,46 +97,64 @@ static void pb_write_kv_int(pb_writer_t *w, const char *key, int64_t val) {
     }
 }
 
-static void pb_write_kv_kvlist(pb_writer_t *w, const char *key,
-                               const uint8_t *indices, const char **names, size_t count) {
-    pb_writer_t kvlist_buf = {NULL, 0, 0};
-    uint8_t kvlist_data[512];
-    kvlist_buf.buf = kvlist_data;
-    kvlist_buf.cap = sizeof(kvlist_data);
+static void pb_write_kv_str(pb_writer_t *w, const char *key, const char *val) {
+    pb_writer_t kv_buf = {NULL, 0, 0};
+    uint8_t kv_data[256];
+    kv_buf.buf = kv_data;
+    kv_buf.cap = sizeof(kv_data);
+
+    pb_write_tag(&kv_buf, 1, WIRE_TYPE_LEN);
+    pb_write_string(&kv_buf, key);
+
+    pb_writer_t any_buf = {NULL, 0, 0};
+    uint8_t any_data[128];
+    any_buf.buf = any_data;
+    any_buf.cap = sizeof(any_data);
+
+    // AnyValue.string_value = field 1, wire type LEN
+    pb_write_tag(&any_buf, 1, WIRE_TYPE_LEN);
+    pb_write_string(&any_buf, val);
+
+    pb_write_tag(&kv_buf, 2, WIRE_TYPE_LEN);
+    pb_write_varint_u64(&kv_buf, any_buf.pos);
+    for (size_t i = 0; i < any_buf.pos; i++) {
+        pb_write_byte(&kv_buf, any_buf.buf[i]);
+    }
+
+    pb_write_tag(w, 1, WIRE_TYPE_LEN);
+    pb_write_varint_u64(w, kv_buf.pos);
+    for (size_t i = 0; i < kv_buf.pos; i++) {
+        pb_write_byte(w, kv_buf.buf[i]);
+    }
+}
+
+static void pb_write_kv_array(pb_writer_t *w, const char *key,
+                              const char **values, size_t count) {
+    // Build ArrayValue: repeated AnyValue values = field 1
+    pb_writer_t array_buf = {NULL, 0, 0};
+    uint8_t array_data[512];
+    array_buf.buf = array_data;
+    array_buf.cap = sizeof(array_data);
 
     for (size_t i = 0; i < count; i++) {
-        pb_writer_t inner_kv_buf = {NULL, 0, 0};
-        uint8_t inner_kv_data[128];
-        inner_kv_buf.buf = inner_kv_data;
-        inner_kv_buf.cap = sizeof(inner_kv_data);
+        pb_writer_t val_buf = {NULL, 0, 0};
+        uint8_t val_data[128];
+        val_buf.buf = val_data;
+        val_buf.cap = sizeof(val_data);
 
-        char index_str[8];
-        snprintf(index_str, sizeof(index_str), "%u", indices[i]);
+        // AnyValue.string_value = field 1, wire type LEN
+        pb_write_tag(&val_buf, 1, WIRE_TYPE_LEN);
+        pb_write_string(&val_buf, values[i]);
 
-        pb_write_tag(&inner_kv_buf, 1, WIRE_TYPE_LEN);
-        pb_write_string(&inner_kv_buf, index_str);
-
-        pb_writer_t inner_any_buf = {NULL, 0, 0};
-        uint8_t inner_any_data[64];
-        inner_any_buf.buf = inner_any_data;
-        inner_any_buf.cap = sizeof(inner_any_data);
-
-        pb_write_tag(&inner_any_buf, 1, WIRE_TYPE_LEN);
-        pb_write_string(&inner_any_buf, names[i]);
-
-        pb_write_tag(&inner_kv_buf, 2, WIRE_TYPE_LEN);
-        pb_write_varint_u64(&inner_kv_buf, inner_any_buf.pos);
-        for (size_t j = 0; j < inner_any_buf.pos; j++) {
-            pb_write_byte(&inner_kv_buf, inner_any_buf.buf[j]);
-        }
-
-        pb_write_tag(&kvlist_buf, 1, WIRE_TYPE_LEN);
-        pb_write_varint_u64(&kvlist_buf, inner_kv_buf.pos);
-        for (size_t j = 0; j < inner_kv_buf.pos; j++) {
-            pb_write_byte(&kvlist_buf, inner_kv_buf.buf[j]);
+        // ArrayValue.values = field 1, wire type LEN
+        pb_write_tag(&array_buf, 1, WIRE_TYPE_LEN);
+        pb_write_varint_u64(&array_buf, val_buf.pos);
+        for (size_t j = 0; j < val_buf.pos; j++) {
+            pb_write_byte(&array_buf, val_buf.buf[j]);
         }
     }
 
+    // Build KeyValue
     pb_writer_t kv_buf = {NULL, 0, 0};
     uint8_t kv_data[1024];
     kv_buf.buf = kv_data;
@@ -150,15 +163,16 @@ static void pb_write_kv_kvlist(pb_writer_t *w, const char *key,
     pb_write_tag(&kv_buf, 1, WIRE_TYPE_LEN);
     pb_write_string(&kv_buf, key);
 
+    // AnyValue.array_value = field 5, wire type LEN
     pb_writer_t any_buf = {NULL, 0, 0};
     uint8_t any_data[768];
     any_buf.buf = any_data;
     any_buf.cap = sizeof(any_data);
 
-    pb_write_tag(&any_buf, 6, WIRE_TYPE_LEN);
-    pb_write_varint_u64(&any_buf, kvlist_buf.pos);
-    for (size_t i = 0; i < kvlist_buf.pos; i++) {
-        pb_write_byte(&any_buf, kvlist_buf.buf[i]);
+    pb_write_tag(&any_buf, 5, WIRE_TYPE_LEN);
+    pb_write_varint_u64(&any_buf, array_buf.pos);
+    for (size_t i = 0; i < array_buf.pos; i++) {
+        pb_write_byte(&any_buf, array_buf.buf[i]);
     }
 
     pb_write_tag(&kv_buf, 2, WIRE_TYPE_LEN);
@@ -212,10 +226,9 @@ void *publish_process_context(void) {
     size_t payload_cap = mapping_size - sizeof(process_ctx_header_t);
 
     pb_writer_t w = {payload, 0, payload_cap};
-    pb_write_kv_int(&w, "threadlocal.schema_version", 1);
+    pb_write_kv_str(&w, "threadlocal.schema_version", "tlsdesc_v1_dev");
     pb_write_kv_int(&w, "threadlocal.max_record_size", MAX_RECORD_SIZE);
-    pb_write_kv_kvlist(&w, "threadlocal.attribute_key_map",
-                       KEY_INDICES, KEY_NAMES, KEY_COUNT);
+    pb_write_kv_array(&w, "threadlocal.attribute_key_map", KEY_NAMES, KEY_COUNT);
 
     if (w.pos >= w.cap) {
         fprintf(stderr, "ERROR: Payload buffer overflow\n");

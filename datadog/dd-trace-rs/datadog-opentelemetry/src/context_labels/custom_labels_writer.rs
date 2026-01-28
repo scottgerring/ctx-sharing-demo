@@ -106,10 +106,9 @@ impl CustomLabelsWriter {
         let http_route_key = self.http_route_key;
         let trace_id = data.trace_id;
         let span_id = data.span_id;
-        let local_root_span_id = data.local_root_span_id;
 
         set_current_record(Some(&span_id), move |builder| {
-            builder.set_trace(&trace_id, &span_id, &local_root_span_id);
+            builder.set_trace(&trace_id, &span_id);
             if let Some(route) = data.http_route {
                 let _ = builder.set_attr_str(http_route_key, route);
             };

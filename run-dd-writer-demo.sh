@@ -60,7 +60,7 @@ if [[ "$USE_EBPF" == "true" ]]; then
     if [[ -n "$READERS" ]]; then
         READER_ARGS="$READER_ARGS --readers $READERS"
     fi
-    sudo env RUST_LOG=info ./target/debug/context-reader "$WRITER_PID" $READER_ARGS
+    sudo env RUST_LOG=info ./target/debug/tail "$WRITER_PID" $READER_ARGS
 else
-    ./target/debug/context-reader "$WRITER_PID" --interval 1000
+    sudo ./target/debug/tail "$WRITER_PID" --interval 1000
 fi
