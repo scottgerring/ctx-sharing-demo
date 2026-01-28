@@ -3,16 +3,34 @@
  *
  * The protobuf encoder here is minimal and hardcoded for our specific
  * use case. It is not a general-purpose protobuf library.
+ *
+ * Updated to match PR #34 from OTel sig-profiling:
+ * - Try memfd_create first, fallback to anonymous mapping
+ * - Use single page mapping size
+ * - Keep mapping writable (no mprotect to read-only)
  */
 
 #define _GNU_SOURCE
 #include "process_context.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+/* memfd_create flags (may not be defined on older systems) */
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifndef MFD_NOEXEC_SEAL
+#define MFD_NOEXEC_SEAL 0x0008U /* Linux 6.3+ */
+#endif
 
 /* Fixed values shared by all variants */
 const uint8_t TRACE_ID[16] = {
@@ -206,18 +224,58 @@ typedef struct {
 
 void *publish_process_context(void) {
     long page_size = sysconf(_SC_PAGESIZE);
-    size_t mapping_size = page_size * 2;
+    size_t mapping_size = page_size; /* PR #34: Use single page instead of 2 */
 
-    void *mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (mapping == MAP_FAILED) {
-        perror("mmap");
-        return NULL;
+    void *mapping = NULL;
+    int memfd = -1;
+    int use_memfd = 0;
+
+    /* Try memfd_create first (with MFD_NOEXEC_SEAL for Linux 6.3+) */
+    memfd = syscall(SYS_memfd_create, "OTEL_CTX",
+                    MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+    if (memfd < 0) {
+        /* Retry without MFD_NOEXEC_SEAL for older kernels */
+        memfd = syscall(SYS_memfd_create, "OTEL_CTX",
+                        MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    }
+
+    if (memfd >= 0) {
+        /* Set the size of the memfd */
+        if (ftruncate(memfd, mapping_size) == -1) {
+            perror("ftruncate");
+            close(memfd);
+            memfd = -1;
+        } else {
+            /* Map the memfd - use MAP_SHARED so it shows in /proc/pid/maps */
+            mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, memfd, 0);
+            if (mapping == MAP_FAILED) {
+                perror("mmap memfd");
+                close(memfd);
+                memfd = -1;
+                mapping = NULL;
+            } else {
+                use_memfd = 1;
+                printf("Created memfd mapping (will appear as /memfd:OTEL_CTX)\n");
+            }
+        }
+    }
+
+    /* Fallback to anonymous mapping if memfd failed */
+    if (!use_memfd) {
+        printf("memfd_create not available, using anonymous mapping\n");
+        mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            perror("mmap");
+            return NULL;
+        }
     }
 
     if (madvise(mapping, mapping_size, MADV_DONTFORK) == -1) {
         perror("madvise");
         munmap(mapping, mapping_size);
+        if (memfd >= 0) close(memfd);
         return NULL;
     }
 
@@ -233,6 +291,7 @@ void *publish_process_context(void) {
     if (w.pos >= w.cap) {
         fprintf(stderr, "ERROR: Payload buffer overflow\n");
         munmap(mapping, mapping_size);
+        if (memfd >= 0) close(memfd);
         return NULL;
     }
 
@@ -249,19 +308,20 @@ void *publish_process_context(void) {
 
     memcpy(hdr->signature, "OTEL_CTX", 8);
 
-    if (mprotect(mapping, mapping_size, PROT_READ) == -1) {
-        perror("mprotect");
-        munmap(mapping, mapping_size);
-        return NULL;
-    }
+    /* PR #34: Removed mprotect to read-only - mapping stays writable for in-place updates */
 
 #ifndef PR_SET_VMA
 #define PR_SET_VMA 0x53564d41
 #define PR_SET_VMA_ANON_NAME 0
 #endif
 
-    prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mapping, mapping_size, "OTEL_CTX");
+    /* For anonymous mappings, try to name via prctl.
+     * memfd mappings don't need this - the name shows in /proc/pid/maps automatically */
+    if (!use_memfd) {
+        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mapping, mapping_size, "OTEL_CTX");
+    }
 
-    printf("Published process-context at %p (payload size: %zu)\n", mapping, w.pos);
+    printf("Published process-context at %p (payload size: %zu, memfd: %s)\n",
+           mapping, w.pos, use_memfd ? "yes" : "no");
     return mapping;
 }
