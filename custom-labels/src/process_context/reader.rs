@@ -55,8 +55,9 @@ fn parse_mapping_range(line: &str) -> Option<(usize, usize)> {
 /// Check if a /proc/self/maps line is a potential OTEL_CTX mapping
 #[cfg(target_os = "linux")]
 fn is_otel_mapping_candidate(line: &str, expected_size: usize) -> bool {
-    // Must have read-only, private permissions
-    if !line.contains(" r--p ") {
+    // Must have read-only permissions (either private or shared)
+    // memfd mappings use r--s (shared), anonymous mappings use r--p (private)
+    if !line.contains(" r--p ") && !line.contains(" r--s ") {
         return false;
     }
 
@@ -76,6 +77,12 @@ fn is_otel_mapping_candidate(line: &str, expected_size: usize) -> bool {
 #[cfg(target_os = "linux")]
 fn is_named_otel_mapping(line: &str) -> bool {
     line.trim_end().ends_with("[anon:OTEL_CTX]")
+}
+
+/// Check if a mapping line refers to the OTEL_CTX memfd mapping
+#[cfg(target_os = "linux")]
+fn is_memfd_otel_mapping(line: &str) -> bool {
+    line.contains("/memfd:OTEL_CTX")
 }
 
 /// Read the signature from a memory address to verify it's an OTEL_CTX mapping
@@ -107,6 +114,13 @@ fn find_otel_mapping() -> Result<usize> {
 
         // First check if it's named
         if is_named_otel_mapping(&line) {
+            if let Some(addr) = parse_mapping_start(&line) {
+                return Ok(addr);
+            }
+        }
+
+        // Check if it's a memfd mapping
+        if is_memfd_otel_mapping(&line) {
             if let Some(addr) = parse_mapping_start(&line) {
                 return Ok(addr);
             }
@@ -206,6 +220,14 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
             }
         }
 
+        // Check if it's a memfd mapping
+        if is_memfd_otel_mapping(&line) {
+            if let Some(addr) = parse_mapping_start(&line) {
+                info!(addr = format!("0x{:x}", addr), "Found memfd OTEL_CTX mapping");
+                return Ok(addr);
+            }
+        }
+
         // Collect unnamed anonymous mappings as candidates
         // Check if the line has no path (anonymous mapping)
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -214,7 +236,8 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
         // Skip special kernel mappings like [vvar], [vdso], [stack], [heap]
         let pathname = parts.get(5).map(|s| *s).unwrap_or("");
         let is_special_kernel = pathname.starts_with('[') && !pathname.contains("anon:OTEL");
-        let is_file_backed = !pathname.is_empty() && !pathname.starts_with('[');
+        let is_memfd = pathname.starts_with("/memfd:");
+        let is_file_backed = !pathname.is_empty() && !pathname.starts_with('[') && !is_memfd;
         let is_true_anonymous = parts.len() <= 5 || pathname.is_empty();
 
         if is_special_kernel {
