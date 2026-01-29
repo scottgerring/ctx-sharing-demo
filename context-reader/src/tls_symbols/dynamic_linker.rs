@@ -57,62 +57,34 @@ struct TlsFieldOffsets {
     l_tls_offset_offset: usize,
 }
 
-/// Dynamically discover the link_map TLS field offsets from glibc.
+/// Discover link_map TLS field offsets from glibc's thread_db symbols.
 ///
-/// ## Rationale
-///
-/// The link_map structure in glibc contains TLS-related fields (l_tls_modid and l_tls_offset)
-/// whose offsets within the structure vary between glibc versions. Hardcoding these offsets
-/// causes failures when the code runs on different glibc versions.
-///
-/// For example:
-/// - glibc 2.31: l_tls_modid at offset 0x490 (1168), l_tls_offset at 0x488 (1160)
-/// - glibc 2.35: l_tls_modid at offset 0x460 (1120), l_tls_offset at 0x458 (1112)
-///
-/// ## Solution
-///
-/// glibc exports special symbols that contain the correct offsets for the current version:
-/// - `_thread_db_link_map_l_tls_modid`: Contains offset of l_tls_modid field
-/// - `_thread_db_link_map_l_tls_offset`: Contains offset of l_tls_offset field
-///
-/// These symbols are part of the thread_db interface used by debuggers (like gdb) to
-/// reliably access thread-local storage across different glibc versions.
-///
-/// The symbol data format is a 12-byte structure:
-/// ```c
-/// struct {
-///     uint32_t indx;   // Structure index (usually 64 for link_map)
-///     uint32_t offset; // Field offset within the structure
-///     uint32_t size;   // Field size in bytes
-/// }
-/// ```
-///
-/// We read these symbols from libc.so at runtime to get the correct offsets for the
-/// running system's glibc version.
-///
-/// ## Returns
-///
-/// Returns the discovered offsets, or falls back to hardcoded defaults (with a warning)
-/// if discovery fails.
+/// The offsets of l_tls_modid and l_tls_offset within link_map vary by glibc version.
+/// We read `_thread_db_link_map_l_tls_*` symbols from libc.so to get the correct offsets.
 fn discover_tls_field_offsets() -> Result<TlsFieldOffsets> {
     use goblin::elf::Elf;
+    use procfs::process::{MMapPath, Process};
     use std::fs;
 
-    // Find libc.so in common locations
-    let libc_paths = [
-        "/lib/x86_64-linux-gnu/libc.so.6",
-        "/lib64/libc.so.6",
-        "/usr/lib/libc.so.6",
-        "/lib/aarch64-linux-gnu/libc.so.6",
-        "/lib/libc.so.6",
-    ];
+    // Find libc.so from our own memory maps
+    let proc = Process::myself().context("Failed to open /proc/self")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
 
-    let libc_path = libc_paths
+    let libc_path = maps
         .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .ok_or_else(|| anyhow!("Could not find libc.so in common locations"))?;
+        .filter_map(|map| {
+            if let MMapPath::Path(ref path) = map.pathname {
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if filename.starts_with("libc.so") || filename.starts_with("libc-") {
+                    return Some(path.clone());
+                }
+            }
+            None
+        })
+        .next()
+        .ok_or_else(|| anyhow!("Could not find libc.so in /proc/self/maps"))?;
 
-    debug!("Reading TLS field offsets from {}", libc_path);
+    debug!("Reading TLS field offsets from {:?}", libc_path);
 
     let buffer = fs::read(libc_path)
         .context("Failed to read libc.so")?;
@@ -157,13 +129,8 @@ fn discover_tls_field_offsets() -> Result<TlsFieldOffsets> {
     let rodata_addr = rodata_section.sh_addr as usize;
     let rodata_size = rodata_section.sh_size as usize;
 
-    // Read the offset data structures (12 bytes each)
-    // Structure format from glibc's thread_db:
-    //   struct { uint32 indx; uint32 num; uint32 offset; }
-    // where:
-    //   - indx: structure type ID (64 for link_map)
-    //   - num: field number within structure
-    //   - offset: byte offset of field in structure (this is what we want!)
+    // Symbol data is a 12-byte struct: { u32 indx, u32 num, u32 offset }
+    // We want the offset field (byte offset of the TLS field in link_map)
     let read_offset_data = |sym_addr: u64| -> Result<usize> {
         let file_offset = rodata_offset + (sym_addr as usize - rodata_addr);
         if file_offset + 12 > rodata_offset + rodata_size {
@@ -359,20 +326,9 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
     Ok(libraries)
 }
 
-/// Read TLS-related values from link_map structure.
-///
-/// The glibc link_map structure contains TLS-related fields:
-/// - l_tls_modid: Module ID for DTV indexing
-/// - l_tls_offset: Offset from thread pointer (used for static TLS calculation)
-///
-/// These field offsets vary between glibc versions, so we discover them dynamically
-/// at runtime by reading glibc's _thread_db_link_map_l_tls_* symbols.
-///
+/// Read l_tls_modid from link_map structure (module ID for DTV indexing).
 fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
-    // Dynamically discover the offset for this glibc version
-    let offsets = get_tls_field_offsets()
-        .context("Failed to get TLS field offsets")?;
-
+    let offsets = get_tls_field_offsets()?;
     let tls_modid_offset = offsets.l_tls_modid_offset;
 
     let field_addr = link_map_addr + tls_modid_offset;
@@ -380,21 +336,15 @@ fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
     read_memory(pid, field_addr, &mut buffer)?;
     let module_id = usize::from_ne_bytes(buffer);
 
-    // l_tls_modid directly corresponds to the DTV index:
-    // - dtv[0] = generation counter
-    // - dtv[n] = module n's TLS block (where n = l_tls_modid)
     debug!("link_map {:#x}: l_tls_modid at offset {:#x} = {}",
            link_map_addr, tls_modid_offset, module_id);
 
     Ok(module_id)
 }
 
-/// Read l_tls_offset from link_map structure.
-/// This is the offset from thread pointer used for static TLS calculation.
+/// Read l_tls_offset from link_map structure (offset from thread pointer for static TLS).
 fn read_tls_offset(pid: i32, link_map_addr: usize) -> Result<usize> {
-    // Dynamically discover the offset for this glibc version
-    let offsets = get_tls_field_offsets()
-        .context("Failed to get TLS field offsets")?;
+    let offsets = get_tls_field_offsets()?;
 
     let tls_offset_offset = offsets.l_tls_offset_offset;
 
