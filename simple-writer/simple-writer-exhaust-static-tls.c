@@ -29,7 +29,7 @@ static volatile sig_atomic_t running = 1;
 static void (*g_v2_setup)(uint64_t);
 static custom_labels_v2_tl_record_t* (*g_v2_record_new)(void);
 static void (*g_v2_record_free)(custom_labels_v2_tl_record_t*);
-static void (*g_v2_record_set_trace)(custom_labels_v2_tl_record_t*, const uint8_t[16], const uint8_t[8], const uint8_t[8]);
+static void (*g_v2_record_set_trace)(custom_labels_v2_tl_record_t*, const uint8_t[16], const uint8_t[8]);
 static int (*g_v2_record_set_attr)(custom_labels_v2_tl_record_t*, uint8_t, const void*, uint8_t);
 static custom_labels_v2_tl_record_t* (*g_v2_set_current_record)(custom_labels_v2_tl_record_t*);
 static void* (*g_v2_get_tls_address)(void);
@@ -57,7 +57,7 @@ static void *worker_thread(void *arg) {
     }
 
     // Set trace context
-    g_v2_record_set_trace(record, TRACE_ID, SPAN_ID, ROOT_SPAN_ID);
+    g_v2_record_set_trace(record, TRACE_ID, SPAN_ID);
 
     // Add attributes
     const char *method = "POST";
@@ -206,7 +206,7 @@ int main(void) {
     g_v2_setup = (void (*)(uint64_t))dlsym(labels_handle, "custom_labels_v2_setup");
     g_v2_record_new = (custom_labels_v2_tl_record_t* (*)(void))dlsym(labels_handle, "custom_labels_v2_record_new");
     g_v2_record_free = (void (*)(custom_labels_v2_tl_record_t*))dlsym(labels_handle, "custom_labels_v2_record_free");
-    g_v2_record_set_trace = (void (*)(custom_labels_v2_tl_record_t*, const uint8_t[16], const uint8_t[8], const uint8_t[8]))
+    g_v2_record_set_trace = (void (*)(custom_labels_v2_tl_record_t*, const uint8_t[16], const uint8_t[8]))
         dlsym(labels_handle, "custom_labels_v2_record_set_trace");
     g_v2_record_set_attr = (int (*)(custom_labels_v2_tl_record_t*, uint8_t, const void*, uint8_t))
         dlsym(labels_handle, "custom_labels_v2_record_set_attr");
@@ -243,7 +243,7 @@ int main(void) {
         goto cleanup;
     }
 
-    g_v2_record_set_trace(record, TRACE_ID, SPAN_ID, ROOT_SPAN_ID);
+    g_v2_record_set_trace(record, TRACE_ID, SPAN_ID);
 
     const char *method = "GET";
     const char *route = "/api/exhaust-static-tls";

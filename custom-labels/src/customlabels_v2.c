@@ -29,7 +29,7 @@ custom_labels_v2_tl_record_t *custom_labels_v2_record_new(void) {
         return NULL;
     }
     record->valid = 0;
-    record->attrs_count = 0;
+    record->attrs_data_size = 0;
     return record;
 }
 
@@ -40,8 +40,7 @@ void custom_labels_v2_record_free(custom_labels_v2_tl_record_t *record) {
 void custom_labels_v2_record_set_trace(
     custom_labels_v2_tl_record_t *record,
     const uint8_t trace_id[16],
-    const uint8_t span_id[8],
-    const uint8_t root_span_id[8]
+    const uint8_t span_id[8]
 ) {
     if (!record) {
         return;
@@ -51,9 +50,6 @@ void custom_labels_v2_record_set_trace(
     }
     if (span_id) {
         memcpy(record->span_id, span_id, 8);
-    }
-    if (root_span_id) {
-        memcpy(record->root_span_id, root_span_id, 8);
     }
 }
 
@@ -71,15 +67,10 @@ int custom_labels_v2_record_set_attr(
         return -1;  // setup() not called
     }
 
-    // Calculate current offset by walking existing attrs
-    // Each attr is: [key:1][length:1][val:length]
-    size_t current_offset = 0;
-    for (uint8_t i = 0; i < record->attrs_count; i++) {
-        uint8_t attr_val_len = record->attrs_data[current_offset + 1];
-        current_offset += 2 + attr_val_len;
-    }
-
-    size_t needed = current_offset + 2 + value_length;
+    // Current offset is tracked by attrs_data_size
+    size_t current_offset = record->attrs_data_size;
+    size_t attr_size = 2 + value_length;  // [key:1][length:1][val:length]
+    size_t needed = current_offset + attr_size;
     size_t available = g_max_record_size - sizeof(custom_labels_v2_tl_record_t);
 
     if (needed > available) {
@@ -94,7 +85,7 @@ int custom_labels_v2_record_set_attr(
     }
 
     BARRIER;
-    record->attrs_count++;
+    record->attrs_data_size += attr_size;
 
     return 0;
 }

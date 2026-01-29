@@ -4,8 +4,8 @@
 //! from raw bytes.
 
 /// V2 TL record header size (fixed portion).
-/// Layout: trace_id[16] | span_id[8] | root_span_id[8] | valid[1] | attrs_count[1]
-pub const V2_HEADER_SIZE: usize = 16 + 8 + 8 + 1 + 1; // 34 bytes
+/// Layout: trace_id[16] | span_id[8] | valid[1] | _padding[1] | attrs_data_size[2]
+pub const V2_HEADER_SIZE: usize = 16 + 8 + 1 + 1 + 2; // 28 bytes
 
 /// Errors that can occur when parsing a v2 TLS record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +34,6 @@ pub struct ParsedRecord {
     pub trace_id: [u8; 16],
     /// 8-byte span ID.
     pub span_id: [u8; 8],
-    /// 8-byte root span ID.
-    pub root_span_id: [u8; 8],
     /// Parsed attributes.
     pub attributes: Vec<ParsedAttribute>,
 }
@@ -60,11 +58,9 @@ impl ParsedRecord {
         let mut span_id = [0u8; 8];
         span_id.copy_from_slice(&data[16..24]);
 
-        let mut root_span_id = [0u8; 8];
-        root_span_id.copy_from_slice(&data[24..32]);
-
-        let valid = data[32];
-        let attrs_count = data[33];
+        let valid = data[24];
+        // data[25] is padding byte, skip it
+        let attrs_data_size = u16::from_le_bytes([data[26], data[27]]);
 
         // If not valid, return error
         if valid == 0 {
@@ -72,15 +68,16 @@ impl ParsedRecord {
         }
 
         // Parse attributes: [key_index:1][length:1][value:length]
+        // Use attrs_data_size to know when to stop parsing
         let attrs_data = &data[V2_HEADER_SIZE..];
+        let attrs_end = attrs_data_size as usize;
         let mut offset = 0;
-        let mut attributes = Vec::with_capacity(attrs_count as usize);
+        let mut attributes = Vec::new();
+        let mut attr_idx = 0;
 
-        for attr_idx in 0..attrs_count {
+        while offset < attrs_end {
             if offset + 2 > attrs_data.len() {
-                return Err(ParseError::TruncatedAttribute {
-                    attr_index: attr_idx as usize,
-                });
+                return Err(ParseError::TruncatedAttribute { attr_index: attr_idx });
             }
 
             let key_index = attrs_data[offset];
@@ -88,21 +85,19 @@ impl ParsedRecord {
             offset += 2;
 
             if offset + value_len > attrs_data.len() {
-                return Err(ParseError::TruncatedAttribute {
-                    attr_index: attr_idx as usize,
-                });
+                return Err(ParseError::TruncatedAttribute { attr_index: attr_idx });
             }
 
             let value = attrs_data[offset..offset + value_len].to_vec();
             offset += value_len;
 
             attributes.push(ParsedAttribute { key_index, value });
+            attr_idx += 1;
         }
 
         Ok(ParsedRecord {
             trace_id,
             span_id,
-            root_span_id,
             attributes,
         })
     }
@@ -115,29 +110,29 @@ mod tests {
     #[test]
     fn test_parse_valid_record() {
         let mut data = vec![0u8; 64];
-        // trace_id
+        // trace_id (bytes 0-15)
         data[0..16].copy_from_slice(&[1u8; 16]);
-        // span_id
+        // span_id (bytes 16-23)
         data[16..24].copy_from_slice(&[2u8; 8]);
-        // root_span_id
-        data[24..32].copy_from_slice(&[3u8; 8]);
-        // valid = 1
-        data[32] = 1;
-        // attrs_count = 2
-        data[33] = 2;
-        // attr 0: key=0, len=3, value="foo"
-        data[34] = 0;
-        data[35] = 3;
-        data[36..39].copy_from_slice(b"foo");
-        // attr 1: key=1, len=3, value="bar"
-        data[39] = 1;
-        data[40] = 3;
-        data[41..44].copy_from_slice(b"bar");
+        // valid = 1 (byte 24)
+        data[24] = 1;
+        // _padding (byte 25) - implicit zero
+        // attrs_data_size = 10 (2 attrs, each 5 bytes: key+len+3 bytes value)
+        // bytes 26-27 (little-endian u16)
+        data[26] = 10;
+        data[27] = 0;
+        // attr 0: key=0, len=3, value="foo" (bytes 28-32)
+        data[28] = 0;
+        data[29] = 3;
+        data[30..33].copy_from_slice(b"foo");
+        // attr 1: key=1, len=3, value="bar" (bytes 33-37)
+        data[33] = 1;
+        data[34] = 3;
+        data[35..38].copy_from_slice(b"bar");
 
         let record = ParsedRecord::parse(&data).unwrap();
         assert_eq!(record.trace_id, [1u8; 16]);
         assert_eq!(record.span_id, [2u8; 8]);
-        assert_eq!(record.root_span_id, [3u8; 8]);
         assert_eq!(record.attributes.len(), 2);
         assert_eq!(record.attributes[0].key_index, 0);
         assert_eq!(record.attributes[0].value, b"foo");
@@ -148,7 +143,7 @@ mod tests {
     #[test]
     fn test_parse_invalid_record() {
         let mut data = vec![0u8; 64];
-        data[32] = 0; // valid = 0
+        data[24] = 0; // valid = 0
 
         let result = ParsedRecord::parse(&data);
         assert_eq!(result, Err(ParseError::NotValid));

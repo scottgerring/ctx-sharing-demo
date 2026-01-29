@@ -3,16 +3,34 @@
  *
  * The protobuf encoder here is minimal and hardcoded for our specific
  * use case. It is not a general-purpose protobuf library.
+ *
+ * Updated to match PR #34 from OTel sig-profiling:
+ * - Try memfd_create first, fallback to anonymous mapping
+ * - Use single page mapping size
+ * - Keep mapping writable (no mprotect to read-only)
  */
 
 #define _GNU_SOURCE
 #include "process_context.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+/* memfd_create flags (may not be defined on older systems) */
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifndef MFD_NOEXEC_SEAL
+#define MFD_NOEXEC_SEAL 0x0008U /* Linux 6.3+ */
+#endif
 
 /* Fixed values shared by all variants */
 const uint8_t TRACE_ID[16] = {
@@ -24,12 +42,7 @@ const uint8_t SPAN_ID[8] = {
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
 };
 
-const uint8_t ROOT_SPAN_ID[8] = {
-    0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11
-};
-
-/* Key configuration */
-static const uint8_t KEY_INDICES[] = {METHOD_IDX, ROUTE_IDX, USER_IDX};
+/* Key configuration - position in array = key index */
 static const char *KEY_NAMES[] = {"method", "route", "user"};
 static const size_t KEY_COUNT = 3;
 
@@ -102,46 +115,64 @@ static void pb_write_kv_int(pb_writer_t *w, const char *key, int64_t val) {
     }
 }
 
-static void pb_write_kv_kvlist(pb_writer_t *w, const char *key,
-                               const uint8_t *indices, const char **names, size_t count) {
-    pb_writer_t kvlist_buf = {NULL, 0, 0};
-    uint8_t kvlist_data[512];
-    kvlist_buf.buf = kvlist_data;
-    kvlist_buf.cap = sizeof(kvlist_data);
+static void pb_write_kv_str(pb_writer_t *w, const char *key, const char *val) {
+    pb_writer_t kv_buf = {NULL, 0, 0};
+    uint8_t kv_data[256];
+    kv_buf.buf = kv_data;
+    kv_buf.cap = sizeof(kv_data);
+
+    pb_write_tag(&kv_buf, 1, WIRE_TYPE_LEN);
+    pb_write_string(&kv_buf, key);
+
+    pb_writer_t any_buf = {NULL, 0, 0};
+    uint8_t any_data[128];
+    any_buf.buf = any_data;
+    any_buf.cap = sizeof(any_data);
+
+    // AnyValue.string_value = field 1, wire type LEN
+    pb_write_tag(&any_buf, 1, WIRE_TYPE_LEN);
+    pb_write_string(&any_buf, val);
+
+    pb_write_tag(&kv_buf, 2, WIRE_TYPE_LEN);
+    pb_write_varint_u64(&kv_buf, any_buf.pos);
+    for (size_t i = 0; i < any_buf.pos; i++) {
+        pb_write_byte(&kv_buf, any_buf.buf[i]);
+    }
+
+    pb_write_tag(w, 1, WIRE_TYPE_LEN);
+    pb_write_varint_u64(w, kv_buf.pos);
+    for (size_t i = 0; i < kv_buf.pos; i++) {
+        pb_write_byte(w, kv_buf.buf[i]);
+    }
+}
+
+static void pb_write_kv_array(pb_writer_t *w, const char *key,
+                              const char **values, size_t count) {
+    // Build ArrayValue: repeated AnyValue values = field 1
+    pb_writer_t array_buf = {NULL, 0, 0};
+    uint8_t array_data[512];
+    array_buf.buf = array_data;
+    array_buf.cap = sizeof(array_data);
 
     for (size_t i = 0; i < count; i++) {
-        pb_writer_t inner_kv_buf = {NULL, 0, 0};
-        uint8_t inner_kv_data[128];
-        inner_kv_buf.buf = inner_kv_data;
-        inner_kv_buf.cap = sizeof(inner_kv_data);
+        pb_writer_t val_buf = {NULL, 0, 0};
+        uint8_t val_data[128];
+        val_buf.buf = val_data;
+        val_buf.cap = sizeof(val_data);
 
-        char index_str[8];
-        snprintf(index_str, sizeof(index_str), "%u", indices[i]);
+        // AnyValue.string_value = field 1, wire type LEN
+        pb_write_tag(&val_buf, 1, WIRE_TYPE_LEN);
+        pb_write_string(&val_buf, values[i]);
 
-        pb_write_tag(&inner_kv_buf, 1, WIRE_TYPE_LEN);
-        pb_write_string(&inner_kv_buf, index_str);
-
-        pb_writer_t inner_any_buf = {NULL, 0, 0};
-        uint8_t inner_any_data[64];
-        inner_any_buf.buf = inner_any_data;
-        inner_any_buf.cap = sizeof(inner_any_data);
-
-        pb_write_tag(&inner_any_buf, 1, WIRE_TYPE_LEN);
-        pb_write_string(&inner_any_buf, names[i]);
-
-        pb_write_tag(&inner_kv_buf, 2, WIRE_TYPE_LEN);
-        pb_write_varint_u64(&inner_kv_buf, inner_any_buf.pos);
-        for (size_t j = 0; j < inner_any_buf.pos; j++) {
-            pb_write_byte(&inner_kv_buf, inner_any_buf.buf[j]);
-        }
-
-        pb_write_tag(&kvlist_buf, 1, WIRE_TYPE_LEN);
-        pb_write_varint_u64(&kvlist_buf, inner_kv_buf.pos);
-        for (size_t j = 0; j < inner_kv_buf.pos; j++) {
-            pb_write_byte(&kvlist_buf, inner_kv_buf.buf[j]);
+        // ArrayValue.values = field 1, wire type LEN
+        pb_write_tag(&array_buf, 1, WIRE_TYPE_LEN);
+        pb_write_varint_u64(&array_buf, val_buf.pos);
+        for (size_t j = 0; j < val_buf.pos; j++) {
+            pb_write_byte(&array_buf, val_buf.buf[j]);
         }
     }
 
+    // Build KeyValue
     pb_writer_t kv_buf = {NULL, 0, 0};
     uint8_t kv_data[1024];
     kv_buf.buf = kv_data;
@@ -150,15 +181,16 @@ static void pb_write_kv_kvlist(pb_writer_t *w, const char *key,
     pb_write_tag(&kv_buf, 1, WIRE_TYPE_LEN);
     pb_write_string(&kv_buf, key);
 
+    // AnyValue.array_value = field 5, wire type LEN
     pb_writer_t any_buf = {NULL, 0, 0};
     uint8_t any_data[768];
     any_buf.buf = any_data;
     any_buf.cap = sizeof(any_data);
 
-    pb_write_tag(&any_buf, 6, WIRE_TYPE_LEN);
-    pb_write_varint_u64(&any_buf, kvlist_buf.pos);
-    for (size_t i = 0; i < kvlist_buf.pos; i++) {
-        pb_write_byte(&any_buf, kvlist_buf.buf[i]);
+    pb_write_tag(&any_buf, 5, WIRE_TYPE_LEN);
+    pb_write_varint_u64(&any_buf, array_buf.pos);
+    for (size_t i = 0; i < array_buf.pos; i++) {
+        pb_write_byte(&any_buf, array_buf.buf[i]);
     }
 
     pb_write_tag(&kv_buf, 2, WIRE_TYPE_LEN);
@@ -192,18 +224,58 @@ typedef struct {
 
 void *publish_process_context(void) {
     long page_size = sysconf(_SC_PAGESIZE);
-    size_t mapping_size = page_size * 2;
+    size_t mapping_size = page_size; /* PR #34: Use single page instead of 2 */
 
-    void *mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (mapping == MAP_FAILED) {
-        perror("mmap");
-        return NULL;
+    void *mapping = NULL;
+    int memfd = -1;
+    int use_memfd = 0;
+
+    /* Try memfd_create first (with MFD_NOEXEC_SEAL for Linux 6.3+) */
+    memfd = syscall(SYS_memfd_create, "OTEL_CTX",
+                    MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+    if (memfd < 0) {
+        /* Retry without MFD_NOEXEC_SEAL for older kernels */
+        memfd = syscall(SYS_memfd_create, "OTEL_CTX",
+                        MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    }
+
+    if (memfd >= 0) {
+        /* Set the size of the memfd */
+        if (ftruncate(memfd, mapping_size) == -1) {
+            perror("ftruncate");
+            close(memfd);
+            memfd = -1;
+        } else {
+            /* Map the memfd - use MAP_SHARED so it shows in /proc/pid/maps */
+            mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, memfd, 0);
+            if (mapping == MAP_FAILED) {
+                perror("mmap memfd");
+                close(memfd);
+                memfd = -1;
+                mapping = NULL;
+            } else {
+                use_memfd = 1;
+                printf("Created memfd mapping (will appear as /memfd:OTEL_CTX)\n");
+            }
+        }
+    }
+
+    /* Fallback to anonymous mapping if memfd failed */
+    if (!use_memfd) {
+        printf("memfd_create not available, using anonymous mapping\n");
+        mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            perror("mmap");
+            return NULL;
+        }
     }
 
     if (madvise(mapping, mapping_size, MADV_DONTFORK) == -1) {
         perror("madvise");
         munmap(mapping, mapping_size);
+        if (memfd >= 0) close(memfd);
         return NULL;
     }
 
@@ -212,14 +284,14 @@ void *publish_process_context(void) {
     size_t payload_cap = mapping_size - sizeof(process_ctx_header_t);
 
     pb_writer_t w = {payload, 0, payload_cap};
-    pb_write_kv_int(&w, "threadlocal.schema_version", 1);
+    pb_write_kv_str(&w, "threadlocal.schema_version", "tlsdesc_v1_dev");
     pb_write_kv_int(&w, "threadlocal.max_record_size", MAX_RECORD_SIZE);
-    pb_write_kv_kvlist(&w, "threadlocal.attribute_key_map",
-                       KEY_INDICES, KEY_NAMES, KEY_COUNT);
+    pb_write_kv_array(&w, "threadlocal.attribute_key_map", KEY_NAMES, KEY_COUNT);
 
     if (w.pos >= w.cap) {
         fprintf(stderr, "ERROR: Payload buffer overflow\n");
         munmap(mapping, mapping_size);
+        if (memfd >= 0) close(memfd);
         return NULL;
     }
 
@@ -236,19 +308,20 @@ void *publish_process_context(void) {
 
     memcpy(hdr->signature, "OTEL_CTX", 8);
 
-    if (mprotect(mapping, mapping_size, PROT_READ) == -1) {
-        perror("mprotect");
-        munmap(mapping, mapping_size);
-        return NULL;
-    }
+    /* PR #34: Removed mprotect to read-only - mapping stays writable for in-place updates */
 
 #ifndef PR_SET_VMA
 #define PR_SET_VMA 0x53564d41
 #define PR_SET_VMA_ANON_NAME 0
 #endif
 
-    prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mapping, mapping_size, "OTEL_CTX");
+    /* For anonymous mappings, try to name via prctl.
+     * memfd mappings don't need this - the name shows in /proc/pid/maps automatically */
+    if (!use_memfd) {
+        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mapping, mapping_size, "OTEL_CTX");
+    }
 
-    printf("Published process-context at %p (payload size: %zu)\n", mapping, w.pos);
+    printf("Published process-context at %p (payload size: %zu, memfd: %s)\n",
+           mapping, w.pos, use_memfd ? "yes" : "no");
     return mapping;
 }

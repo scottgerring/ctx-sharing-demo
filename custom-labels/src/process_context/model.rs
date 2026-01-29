@@ -22,6 +22,8 @@ pub enum Value {
     Int(i64),
     /// Key-value list (AnyValue.kvlist_value)
     KvList(Vec<KeyValue>),
+    /// Array value (AnyValue.array_value)
+    Array(Vec<Value>),
 }
 
 impl From<&str> for Value {
@@ -87,6 +89,14 @@ impl Value {
     pub fn as_kvlist(&self) -> Option<&[KeyValue]> {
         match self {
             Value::KvList(kvs) => Some(kvs.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Returns the array value if this is a `Value::Array`, otherwise `None`.
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(arr) => Some(arr.as_slice()),
             _ => None,
         }
     }

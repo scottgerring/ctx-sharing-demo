@@ -24,14 +24,14 @@ struct MappingHeader {
     payload_ptr: *const u8,
 }
 
-/// Get the expected mapping size (2 pages)
+/// Get the page size
 #[cfg(target_os = "linux")]
-fn expected_mapping_size() -> Option<usize> {
+fn get_page_size() -> Option<usize> {
     let page_size = unsafe { sysconf(_SC_PAGESIZE) };
     if page_size < 4096 {
         return None;
     }
-    Some((page_size as usize) * 2)
+    Some(page_size as usize)
 }
 
 /// Parse the start address from a /proc/self/maps line
@@ -53,17 +53,25 @@ fn parse_mapping_range(line: &str) -> Option<(usize, usize)> {
 }
 
 /// Check if a /proc/self/maps line is a potential OTEL_CTX mapping
+///
+/// Accepts both read-only (" r--p ") and read-write (" rw-p "/" rw-s ") permissions
+/// for backwards compatibility (old writers used read-only, new writers use read-write).
+/// memfd mappings use MAP_SHARED so they show as " rw-s ".
+/// Also accepts both 1-page (new) and 2-page (old) mapping sizes.
 #[cfg(target_os = "linux")]
-fn is_otel_mapping_candidate(line: &str, expected_size: usize) -> bool {
-    // Must have read-only permissions (either private or shared)
-    // memfd mappings use r--s (shared), anonymous mappings use r--p (private)
-    if !line.contains(" r--p ") && !line.contains(" r--s ") {
+fn is_otel_mapping_candidate(line: &str, page_size: usize) -> bool {
+    // Accept read-only (old), read-write private (anon), and read-write shared (memfd)
+    let has_valid_perms =
+        line.contains(" r--p ") || line.contains(" rw-p ") || line.contains(" rw-s ");
+    if !has_valid_perms {
         return false;
     }
 
-    // Check size matches expected
+    // Check size matches expected (accept both 1-page new and 2-page old mappings)
     if let Some((start, end)) = parse_mapping_range(line) {
-        if end <= start || (end - start) != expected_size {
+        let size = end.saturating_sub(start);
+        // Accept 1 page (new format) or 2 pages (old format)
+        if size != page_size && size != page_size * 2 {
             return false;
         }
     } else {
@@ -74,9 +82,21 @@ fn is_otel_mapping_candidate(line: &str, expected_size: usize) -> bool {
 }
 
 /// Check if a mapping line refers to the OTEL_CTX mapping by name
+///
+/// Handles both anonymous naming (`[anon:OTEL_CTX]`) and memfd naming
+/// (`/memfd:OTEL_CTX` which may have ` (deleted)` suffix).
 #[cfg(target_os = "linux")]
 fn is_named_otel_mapping(line: &str) -> bool {
-    line.trim_end().ends_with("[anon:OTEL_CTX]")
+    let trimmed = line.trim_end();
+    // Check for anonymous naming: [anon:OTEL_CTX]
+    if trimmed.ends_with("[anon:OTEL_CTX]") {
+        return true;
+    }
+    // Check for memfd naming: /memfd:OTEL_CTX (possibly with " (deleted)" suffix)
+    if trimmed.contains("/memfd:OTEL_CTX") || trimmed.contains("memfd:OTEL_CTX") {
+        return true;
+    }
+    false
 }
 
 /// Check if a mapping line refers to the OTEL_CTX memfd mapping
@@ -99,8 +119,8 @@ fn verify_signature_at(addr: usize) -> bool {
 /// Find the OTEL_CTX mapping in /proc/self/maps
 #[cfg(target_os = "linux")]
 fn find_otel_mapping() -> Result<usize> {
-    let expected_size = expected_mapping_size()
-        .ok_or_else(|| Error::MappingFailed("failed to get page size".to_string()))?;
+    let page_size =
+        get_page_size().ok_or_else(|| Error::MappingFailed("failed to get page size".to_string()))?;
 
     let file = File::open("/proc/self/maps")?;
     let reader = BufReader::new(file);
@@ -108,7 +128,7 @@ fn find_otel_mapping() -> Result<usize> {
     for line in reader.lines() {
         let line = line?;
 
-        if !is_otel_mapping_candidate(&line, expected_size) {
+        if !is_otel_mapping_candidate(&line, page_size) {
             continue;
         }
 
@@ -146,6 +166,7 @@ fn find_otel_mapping() -> Result<usize> {
 /// Returns the decoded `ProcessContext` if found, or an error if:
 /// - No OTEL_CTX mapping was found
 /// - The mapping has an invalid signature or version
+/// - An update is in progress (`published_at_ns == 0`)
 /// - The payload failed to decode
 #[cfg(target_os = "linux")]
 pub fn read_process_context() -> Result<ProcessContext> {
@@ -154,12 +175,13 @@ pub fn read_process_context() -> Result<ProcessContext> {
 
     // Read and validate header
     // Safety: We found this address in /proc/self/maps and verified the signature
-    let (signature, version, payload_size, payload_ptr) = unsafe {
+    let (signature, version, payload_size, published_at_ns, payload_ptr) = unsafe {
         let header = std::ptr::read_volatile(header_ptr);
         (
             header.signature,
             header.version,
             header.payload_size,
+            header.published_at_ns,
             header.payload_ptr,
         )
     };
@@ -167,6 +189,11 @@ pub fn read_process_context() -> Result<ProcessContext> {
     // Validate signature
     if signature != *SIGNATURE {
         return Err(Error::DecodingFailed("invalid signature".to_string()));
+    }
+
+    // Check for update in progress (PR #34 protocol)
+    if published_at_ns == 0 {
+        return Err(Error::DecodingFailed("update in progress".to_string()));
     }
 
     // Validate version
@@ -179,9 +206,7 @@ pub fn read_process_context() -> Result<ProcessContext> {
 
     // Read the payload
     // Safety: The payload pointer was set by the writer in our process space
-    let payload = unsafe {
-        std::slice::from_raw_parts(payload_ptr, payload_size as usize)
-    };
+    let payload = unsafe { std::slice::from_raw_parts(payload_ptr, payload_size as usize) };
 
     // Decode the payload
     encoding::decode(payload)
@@ -192,10 +217,10 @@ pub fn read_process_context() -> Result<ProcessContext> {
 fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
     use tracing::{debug, info};
 
-    let expected_size = expected_mapping_size()
-        .ok_or_else(|| Error::MappingFailed("failed to get page size".to_string()))?;
+    let page_size =
+        get_page_size().ok_or_else(|| Error::MappingFailed("failed to get page size".to_string()))?;
 
-    debug!(pid = pid, expected_size = expected_size, "Searching for OTEL_CTX mapping");
+    debug!(pid = pid, page_size = page_size, "Searching for OTEL_CTX mapping");
 
     let maps_path = format!("/proc/{}/maps", pid);
     let file = File::open(&maps_path)?;
@@ -206,13 +231,13 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
     for line in reader.lines() {
         let line = line?;
 
-        if !is_otel_mapping_candidate(&line, expected_size) {
+        if !is_otel_mapping_candidate(&line, page_size) {
             continue;
         }
 
-        debug!(line = %line, "Found candidate mapping (right size + read-only)");
+        debug!(line = %line, "Found candidate mapping (right size + valid permissions)");
 
-        // First check if it's named
+        // First check if it's named (memfd or anon)
         if is_named_otel_mapping(&line) {
             if let Some(addr) = parse_mapping_start(&line) {
                 info!(addr = format!("0x{:x}", addr), "Found named OTEL_CTX mapping");
@@ -234,10 +259,11 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
         // /proc/pid/maps format: address perms offset dev inode [pathname]
         // Anonymous mappings have 5 fields (no pathname)
         // Skip special kernel mappings like [vvar], [vdso], [stack], [heap]
-        let pathname = parts.get(5).map(|s| *s).unwrap_or("");
+        let pathname = parts.get(5).copied().unwrap_or("");
         let is_special_kernel = pathname.starts_with('[') && !pathname.contains("anon:OTEL");
-        let is_memfd = pathname.starts_with("/memfd:");
-        let is_file_backed = !pathname.is_empty() && !pathname.starts_with('[') && !is_memfd;
+        let is_file_backed = !pathname.is_empty()
+            && !pathname.starts_with('[')
+            && !pathname.contains("memfd:OTEL");
         let is_true_anonymous = parts.len() <= 5 || pathname.is_empty();
 
         if is_special_kernel {
@@ -282,6 +308,7 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
 /// - No OTEL_CTX mapping was found
 /// - Failed to read from the target process
 /// - The mapping has an invalid signature or version
+/// - An update is in progress (`published_at_ns == 0`)
 /// - The payload failed to decode
 #[cfg(target_os = "linux")]
 pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
@@ -322,11 +349,18 @@ pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
     let signature: [u8; 8] = header_buf[0..8].try_into().unwrap();
     let version = u32::from_ne_bytes(header_buf[8..12].try_into().unwrap());
     let payload_size = u32::from_ne_bytes(header_buf[12..16].try_into().unwrap());
-    let payload_ptr = usize::from_ne_bytes(header_buf[24..24 + size_of::<usize>()].try_into().unwrap());
+    let published_at_ns = u64::from_ne_bytes(header_buf[16..24].try_into().unwrap());
+    let payload_ptr =
+        usize::from_ne_bytes(header_buf[24..24 + size_of::<usize>()].try_into().unwrap());
 
     // Validate signature
     if signature != *SIGNATURE {
         return Err(Error::DecodingFailed("invalid signature".to_string()));
+    }
+
+    // Check for update in progress (PR #34 protocol)
+    if published_at_ns == 0 {
+        return Err(Error::DecodingFailed("update in progress".to_string()));
     }
 
     // Validate version

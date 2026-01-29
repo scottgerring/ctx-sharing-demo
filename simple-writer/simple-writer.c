@@ -37,7 +37,7 @@ int main(void) {
     }
 
     // Step 4: Set trace context
-    custom_labels_v2_record_set_trace(record, TRACE_ID, SPAN_ID, ROOT_SPAN_ID);
+    custom_labels_v2_record_set_trace(record, TRACE_ID, SPAN_ID);
 
     // Step 5: Add attributes
     const char *method = "GET";

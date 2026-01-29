@@ -1,6 +1,6 @@
 //! V2 TLS Reader - reads the custom-labels v2 format (binary TL records)
 //!
-//! V2 format has trace_id, span_id, root_span_id as first-class fields,
+//! V2 format has trace_id and span_id as first-class fields,
 //! with custom attributes using indexed keys from the key table.
 
 use anyhow::{Context, Result};
@@ -165,10 +165,6 @@ impl V2Reader {
         labels.push(Label {
             key: "span_id".to_string(),
             value: LabelValue::Bytes(record.span_id.to_vec()),
-        });
-        labels.push(Label {
-            key: "local_root_span_id".to_string(),
-            value: LabelValue::Bytes(record.root_span_id.to_vec()),
         });
 
         // Convert attributes to labels

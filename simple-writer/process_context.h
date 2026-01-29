@@ -14,7 +14,6 @@
 /* Fixed values for reproducible testing */
 extern const uint8_t TRACE_ID[16];
 extern const uint8_t SPAN_ID[8];
-extern const uint8_t ROOT_SPAN_ID[8];
 
 /* Attribute key indices */
 #define METHOD_IDX 0

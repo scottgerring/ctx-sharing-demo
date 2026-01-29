@@ -211,6 +211,7 @@ if [[ "$VALIDATE_MODE" == "all" ]]; then
     rm -rf simple-writer/build
     mkdir -p simple-writer/build
     cd custom-labels && make clean >/dev/null 2>&1 && cd ..
+    cd tls-filler && make clean >/dev/null 2>&1 && cd ..
     echo ""
 
     # Build context-reader once upfront
