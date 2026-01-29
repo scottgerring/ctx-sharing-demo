@@ -99,6 +99,12 @@ fn is_named_otel_mapping(line: &str) -> bool {
     false
 }
 
+/// Check if a mapping line refers to the OTEL_CTX memfd mapping
+#[cfg(target_os = "linux")]
+fn is_memfd_otel_mapping(line: &str) -> bool {
+    line.contains("/memfd:OTEL_CTX")
+}
+
 /// Read the signature from a memory address to verify it's an OTEL_CTX mapping
 #[cfg(target_os = "linux")]
 fn verify_signature_at(addr: usize) -> bool {
@@ -128,6 +134,13 @@ fn find_otel_mapping() -> Result<usize> {
 
         // First check if it's named
         if is_named_otel_mapping(&line) {
+            if let Some(addr) = parse_mapping_start(&line) {
+                return Ok(addr);
+            }
+        }
+
+        // Check if it's a memfd mapping
+        if is_memfd_otel_mapping(&line) {
             if let Some(addr) = parse_mapping_start(&line) {
                 return Ok(addr);
             }
@@ -228,6 +241,14 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
         if is_named_otel_mapping(&line) {
             if let Some(addr) = parse_mapping_start(&line) {
                 info!(addr = format!("0x{:x}", addr), "Found named OTEL_CTX mapping");
+                return Ok(addr);
+            }
+        }
+
+        // Check if it's a memfd mapping
+        if is_memfd_otel_mapping(&line) {
+            if let Some(addr) = parse_mapping_start(&line) {
+                info!(addr = format!("0x{:x}", addr), "Found memfd OTEL_CTX mapping");
                 return Ok(addr);
             }
         }

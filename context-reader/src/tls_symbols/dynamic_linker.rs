@@ -49,6 +49,167 @@ struct RDebug {
     r_ldbase: usize,  // Base address of ld.so
 }
 
+/// Cached offsets for link_map TLS fields.
+/// These vary by glibc version and must be discovered at runtime.
+#[derive(Debug, Clone, Copy)]
+struct TlsFieldOffsets {
+    l_tls_modid_offset: usize,
+    l_tls_offset_offset: usize,
+}
+
+/// Discover link_map TLS field offsets from glibc's thread_db symbols.
+///
+/// The offsets of l_tls_modid and l_tls_offset within link_map vary by glibc version.
+/// We read `_thread_db_link_map_l_tls_*` symbols from libc.so to get the correct offsets.
+fn discover_tls_field_offsets() -> Result<TlsFieldOffsets> {
+    use goblin::elf::Elf;
+    use procfs::process::{MMapPath, Process};
+    use std::fs;
+
+    // Find libc.so from our own memory maps
+    let proc = Process::myself().context("Failed to open /proc/self")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
+
+    let libc_path = maps
+        .iter()
+        .filter_map(|map| {
+            if let MMapPath::Path(ref path) = map.pathname {
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if filename.starts_with("libc.so") || filename.starts_with("libc-") {
+                    return Some(path.clone());
+                }
+            }
+            None
+        })
+        .next()
+        .ok_or_else(|| anyhow!("Could not find libc.so in /proc/self/maps"))?;
+
+    debug!("Reading TLS field offsets from {:?}", libc_path);
+
+    let buffer = fs::read(libc_path)
+        .context("Failed to read libc.so")?;
+    let elf = Elf::parse(&buffer)
+        .context("Failed to parse libc.so ELF")?;
+
+    // Find the symbols in dynamic symbol table
+    let mut modid_sym_value: Option<u64> = None;
+    let mut offset_sym_value: Option<u64> = None;
+
+    for sym in elf.dynsyms.iter() {
+        if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+            match name {
+                "_thread_db_link_map_l_tls_modid" => {
+                    modid_sym_value = Some(sym.st_value);
+                    debug!("Found _thread_db_link_map_l_tls_modid at offset {:#x}", sym.st_value);
+                }
+                "_thread_db_link_map_l_tls_offset" => {
+                    offset_sym_value = Some(sym.st_value);
+                    debug!("Found _thread_db_link_map_l_tls_offset at offset {:#x}", sym.st_value);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let modid_addr = modid_sym_value
+        .ok_or_else(|| anyhow!("_thread_db_link_map_l_tls_modid symbol not found"))?;
+    let offset_addr = offset_sym_value
+        .ok_or_else(|| anyhow!("_thread_db_link_map_l_tls_offset symbol not found"))?;
+
+    // Find the .rodata section to read the symbol data
+    let rodata_section = elf.section_headers.iter()
+        .find(|sh| {
+            elf.shdr_strtab.get_at(sh.sh_name)
+                .map(|name| name == ".rodata")
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| anyhow!(".rodata section not found"))?;
+
+    let rodata_offset = rodata_section.sh_offset as usize;
+    let rodata_addr = rodata_section.sh_addr as usize;
+    let rodata_size = rodata_section.sh_size as usize;
+
+    // Symbol data is a 12-byte struct: { u32 indx, u32 num, u32 offset }
+    // We want the offset field (byte offset of the TLS field in link_map)
+    let read_offset_data = |sym_addr: u64| -> Result<usize> {
+        let file_offset = rodata_offset + (sym_addr as usize - rodata_addr);
+        if file_offset + 12 > rodata_offset + rodata_size {
+            anyhow::bail!("Symbol data outside .rodata section");
+        }
+
+        // Read the 12-byte structure
+        let data = &buffer[file_offset..file_offset + 12];
+        let indx = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let num = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let offset = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+
+        debug!("  indx={}, num={}, offset={} ({:#x})", indx, num, offset, offset);
+        Ok(offset as usize)
+    };
+
+    let l_tls_modid_offset = read_offset_data(modid_addr)
+        .context("Failed to read l_tls_modid offset")?;
+    let l_tls_offset_offset = read_offset_data(offset_addr)
+        .context("Failed to read l_tls_offset offset")?;
+
+    debug!(
+        "Discovered TLS field offsets: l_tls_modid at {:#x}, l_tls_offset at {:#x}",
+        l_tls_modid_offset, l_tls_offset_offset
+    );
+
+    Ok(TlsFieldOffsets {
+        l_tls_modid_offset,
+        l_tls_offset_offset,
+    })
+}
+
+/// Get TLS field offsets, using cached values after first call.
+///
+/// This function ensures we only discover the offsets once per process execution,
+/// caching them for subsequent calls.
+fn get_tls_field_offsets() -> Result<TlsFieldOffsets> {
+    use std::sync::OnceLock;
+
+    static OFFSETS: OnceLock<TlsFieldOffsets> = OnceLock::new();
+
+    // Try to get cached value first
+    if let Some(offsets) = OFFSETS.get() {
+        return Ok(*offsets);
+    }
+
+    // Discover offsets or use fallback
+    let offsets = match discover_tls_field_offsets() {
+        Ok(offsets) => offsets,
+        Err(e) => {
+            // Fall back to hardcoded defaults with a warning
+            // These work for older glibc versions but may be incorrect for others
+            #[cfg(target_arch = "x86_64")]
+            let defaults = TlsFieldOffsets {
+                l_tls_modid_offset: 0x490,  // glibc 2.31 default
+                l_tls_offset_offset: 0x488,
+            };
+
+            #[cfg(target_arch = "aarch64")]
+            let defaults = TlsFieldOffsets {
+                l_tls_modid_offset: 0x498,
+                l_tls_offset_offset: 0x490,
+            };
+
+            tracing::warn!(
+                "Failed to discover TLS field offsets dynamically: {}. Using hardcoded defaults which may be incorrect for this glibc version.",
+                e
+            );
+
+            defaults
+        }
+    };
+
+    // Cache for next time (ignore error if another thread already set it)
+    let _ = OFFSETS.set(offsets);
+
+    Ok(offsets)
+}
+
 /// Find the address of the _r_debug symbol in the target process.
 /// This symbol is defined by the dynamic linker (ld.so) and contains the link_map chain.
 pub fn find_r_debug_address(pid: i32) -> Result<usize> {
@@ -165,66 +326,35 @@ pub fn walk_link_map_chain(pid: i32, r_debug_addr: usize) -> Result<Vec<LoadedLi
     Ok(libraries)
 }
 
-/// Read TLS-related values from link_map structure.
-///
-/// The glibc link_map structure contains TLS-related fields:
-/// - l_tls_modid: Module ID for DTV indexing
-/// - l_tls_offset: Offset from thread pointer (used for static TLS calculation)
-///
-/// The offsets were determined from glibc's _thread_db_link_map_l_tls_* symbols:
-/// - l_tls_offset: offset 1168 (0x490)
-/// - l_tls_modid: offset 1176 (0x498)
-///
-/// These may vary between glibc versions. A more robust approach would be
-/// to read the _thread_db_link_map_l_tls_* symbols from the target process.
-///
+/// Read l_tls_modid from link_map structure (module ID for DTV indexing).
 fn read_tls_modid(pid: i32, link_map_addr: usize) -> Result<usize> {
-    // Offset from _thread_db_link_map_l_tls_modid
-    // These offsets vary by architecture (determined via GDB inspection of the symbol)
-    #[cfg(target_arch = "x86_64")]
-    const TLS_MODID_OFFSET: usize = 0x490;  // 1168 on x86-64
+    let offsets = get_tls_field_offsets()?;
+    let tls_modid_offset = offsets.l_tls_modid_offset;
 
-    #[cfg(target_arch = "aarch64")]
-    const TLS_MODID_OFFSET: usize = 0x498;  // 1176 on ARM64
-
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("Unsupported architecture for TLS_MODID_OFFSET");
-
-    let field_addr = link_map_addr + TLS_MODID_OFFSET;
+    let field_addr = link_map_addr + tls_modid_offset;
     let mut buffer = [0u8; std::mem::size_of::<usize>()];
     read_memory(pid, field_addr, &mut buffer)?;
     let module_id = usize::from_ne_bytes(buffer);
 
-    // l_tls_modid directly corresponds to the DTV index:
-    // - dtv[0] = generation counter
-    // - dtv[n] = module n's TLS block (where n = l_tls_modid)
     debug!("link_map {:#x}: l_tls_modid at offset {:#x} = {}",
-           link_map_addr, TLS_MODID_OFFSET, module_id);
+           link_map_addr, tls_modid_offset, module_id);
 
     Ok(module_id)
 }
 
-/// Read l_tls_offset from link_map structure.
-/// This is the offset from thread pointer used for static TLS calculation.
+/// Read l_tls_offset from link_map structure (offset from thread pointer for static TLS).
 fn read_tls_offset(pid: i32, link_map_addr: usize) -> Result<usize> {
-    // Offset from _thread_db_link_map_l_tls_offset
-    // These offsets vary by architecture (determined via GDB inspection of the symbol)
-    #[cfg(target_arch = "x86_64")]
-    const TLS_OFFSET_OFFSET: usize = 0x488;  // 1160 on x86-64
+    let offsets = get_tls_field_offsets()?;
 
-    #[cfg(target_arch = "aarch64")]
-    const TLS_OFFSET_OFFSET: usize = 0x490;  // 1168 on ARM64
+    let tls_offset_offset = offsets.l_tls_offset_offset;
 
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("Unsupported architecture for TLS_OFFSET_OFFSET");
-
-    let field_addr = link_map_addr + TLS_OFFSET_OFFSET;
+    let field_addr = link_map_addr + tls_offset_offset;
     let mut buffer = [0u8; std::mem::size_of::<usize>()];
     read_memory(pid, field_addr, &mut buffer)?;
     let tls_offset = usize::from_ne_bytes(buffer);
 
     debug!("link_map {:#x}: l_tls_offset at offset {:#x} = {:#x}",
-           link_map_addr, TLS_OFFSET_OFFSET, tls_offset);
+           link_map_addr, tls_offset_offset, tls_offset);
 
     Ok(tls_offset)
 }
