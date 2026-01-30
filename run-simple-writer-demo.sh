@@ -28,8 +28,8 @@ is_valid_combination() {
     local labels=$1
     local clib=$2
 
-    # Only static linking works with musl (context-reader can't resolve TLS for musl dlopen)
-    if [[ "$clib" == "musl" && "$labels" != "static" ]]; then
+    # musl supports static and dlopen (dynamic linking not yet supported)
+    if [[ "$clib" == "musl" && "$labels" != "static" && "$labels" != "dlopen" ]]; then
         return 1
     fi
     return 0
@@ -46,6 +46,9 @@ build_variant() {
     cd custom-labels
     if [[ "$labels" == "static" ]]; then
         make libcustomlabels.a >/dev/null 2>&1
+    elif [[ "$clib" == "musl" ]]; then
+        # musl dlopen needs the musl-specific shared library
+        make libcustomlabels-musl.so >/dev/null 2>&1
     else
         make libcustomlabels.so >/dev/null 2>&1
     fi

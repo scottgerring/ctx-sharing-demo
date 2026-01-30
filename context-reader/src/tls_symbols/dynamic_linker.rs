@@ -2,12 +2,69 @@
 /// Generic dynamic linker introspection for Linux processes.
 /// Provides link_map walking and module ID resolution independent of any
 /// specific TLS variable or application logic.
-/// 
+///
+/// Supports both glibc and musl:
+/// - glibc: Uses `_r_debug` → `r_map` → `link_map` chain with `l_tls_modid`
+/// - musl: Uses `_dl_debug_addr` → `head` → `struct dso` chain with `tls_id`
+///
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
 use super::memory::read_memory;
+
+/// Detected C library type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Libc {
+    Glibc,
+    Musl,
+}
+
+/// Detect whether the target process uses glibc or musl.
+/// This is done by examining the dynamic linker in the process memory maps.
+///
+/// Detection strategies:
+/// - glibc: dynamic linker named `ld-linux-*.so.*` or `ld.so.*`
+/// - musl: dynamic linker named `ld-musl-*.so.*` OR path contains `-linux-musl/libc.so`
+///   (Ubuntu's musl-tools resolves symlink to /usr/lib/aarch64-linux-musl/libc.so)
+///
+/// Note: This can't detect statically linked musl binaries (no dynamic linker visible),
+/// but that probably doesn't matter since static musl binaries have no DSO chain to
+/// walk anyway. If needed, we could try symbol scanning (musl exports `_dl_debug_addr`,
+/// glibc exports `_r_debug`).
+pub fn detect_libc(pid: i32) -> Result<Libc> {
+    use procfs::process::{MMapPath, Process};
+
+    debug!("Detecting libc type for process {}", pid);
+
+    let proc = Process::new(pid).context("Failed to open process")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
+
+    for map in maps.iter() {
+        if let MMapPath::Path(ref path) = map.pathname {
+            let path_str = path.to_string_lossy();
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            // Check for musl dynamic linker
+            // - Standard: ld-musl-aarch64.so.1, ld-musl-x86_64.so.1
+            // - Ubuntu musl-tools: /usr/lib/aarch64-linux-musl/libc.so (resolved symlink)
+            if filename.starts_with("ld-musl")
+                || (path_str.contains("-linux-musl/") && filename == "libc.so")
+            {
+                debug!("Detected musl libc (found {:?})", path);
+                return Ok(Libc::Musl);
+            }
+
+            // Check for glibc dynamic linker
+            if filename.starts_with("ld-linux") || filename.starts_with("ld.so") {
+                debug!("Detected glibc (found {})", filename);
+                return Ok(Libc::Glibc);
+            }
+        }
+    }
+
+    Err(anyhow!("Could not detect libc type from process memory maps"))
+}
 
 /// Represents a loaded library in the target process
 #[derive(Debug, Clone)]
@@ -366,17 +423,31 @@ pub struct TlsResolution {
     pub tls_offset: usize,
 }
 
-/// Resolve the module ID and TLS offset for a specific library path
+/// Resolve the module ID and TLS offset for a specific library path.
+/// Automatically detects glibc vs musl and uses the appropriate method.
 pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> {
+    match detect_libc(pid)? {
+        Libc::Glibc => resolve_tls_info_glibc(pid, library_path),
+        Libc::Musl => resolve_tls_info_musl(pid, library_path),
+    }
+}
+
+/// Resolve TLS info using glibc's link_map chain
+fn resolve_tls_info_glibc(pid: i32, library_path: &Path) -> Result<TlsResolution> {
     let r_debug_addr = find_r_debug_address(pid)
         .context("Failed to find _r_debug address")?;
     let libraries = walk_link_map_chain(pid, r_debug_addr)
         .context("Failed to walk link_map chain")?;
 
+    find_library_in_list(&libraries, library_path)
+}
+
+/// Find a library in the loaded libraries list by path
+fn find_library_in_list(libraries: &[LoadedLibrary], library_path: &Path) -> Result<TlsResolution> {
     debug!("Looking for library {:?} in {} loaded libraries", library_path, libraries.len());
 
     // Match by path - try exact match first
-    for lib in &libraries {
+    for lib in libraries {
         if lib.path == library_path {
             debug!("Resolved TLS info for {:?}: module_id={}, tls_offset={:#x}",
                   library_path, lib.module_id, lib.tls_offset);
@@ -390,7 +461,7 @@ pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> 
     // Try matching by filename only (for dlopen'd libraries that may have different paths)
     let target_filename = library_path.file_name();
     if let Some(target_name) = target_filename {
-        for lib in &libraries {
+        for lib in libraries {
             if lib.path.file_name() == Some(target_name) {
                 debug!("Resolved TLS info for {:?} (matched by filename): module_id={}, tls_offset={:#x}",
                       library_path, lib.module_id, lib.tls_offset);
@@ -403,12 +474,12 @@ pub fn resolve_tls_info(pid: i32, library_path: &Path) -> Result<TlsResolution> 
     }
 
     // Log all libraries for debugging
-    debug!("Libraries in link_map chain:");
-    for lib in &libraries {
+    debug!("Libraries in loaded list:");
+    for lib in libraries {
         debug!("  module_id={}, tls_offset={:#x}: {:?}", lib.module_id, lib.tls_offset, lib.path);
     }
 
-    Err(anyhow!("Library {:?} not found in link_map chain", library_path))
+    Err(anyhow!("Library {:?} not found in loaded libraries", library_path))
 }
 
 /// Resolve the module ID for a specific library path (legacy function)
@@ -466,4 +537,233 @@ fn read_string_from_process(pid: i32, addr: usize) -> Result<String> {
     }
 
     String::from_utf8(result).context("Invalid UTF-8 in library name")
+}
+
+// ============================================================================
+// musl-specific implementation
+// ============================================================================
+
+/// musl's debug structure (from ldso/dynlink.c).
+/// musl exports `_dl_debug_addr` which points to this struct containing
+/// the head of the DSO (Dynamic Shared Object) chain.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct MuslDebug {
+    ver: i32,
+    _pad: i32,
+    head: usize,    // struct dso *
+    bp: usize,      // void (*bp)(void)
+    state: i32,
+    _pad2: i32,
+    base: usize,
+}
+
+/// Header fields from musl's struct dso (from ldso/dynlink.c).
+/// We only read the initial fields needed for chain walking; tls_id is read
+/// separately at MUSL_DSO_TLS_ID_OFFSET since its position varies by version.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct MuslDsoHeader {
+    base: usize,    // unsigned char *base
+    name: usize,    // char *name
+    dynv: usize,    // size_t *dynv
+    next: usize,    // struct dso *next
+    prev: usize,    // struct dso *prev
+}
+
+/// Offset of tls_id field in musl's struct dso.
+///
+/// Unlike glibc, which exports `_thread_db_link_map_l_tls_*` symbols for dynamic
+/// offset discovery, musl treats struct dso as an internal implementation detail
+/// and provides no introspection mechanism (musl intentionally doesn't implement
+/// libthread_db: https://inbox.vuxu.org/musl/20220210213219.GF7074@brightrain.aerifal.cx/).
+/// musl's suggested alternative is to call `__tls_get_addr()` in the target, but
+/// this isn't possible from eBPF. We're stuck with hardcoded offsets here - would
+/// be happy to be wrong!
+///
+/// These offsets were determined empirically for musl 1.2.x and may need
+/// adjustment for other versions.
+#[cfg(target_arch = "aarch64")]
+const MUSL_DSO_TLS_ID_OFFSET: usize = 0xc0;
+
+#[cfg(target_arch = "x86_64")]
+const MUSL_DSO_TLS_ID_OFFSET: usize = 0xc0;
+
+/// Find the address of musl's _dl_debug_addr symbol in the target process.
+/// musl's dynamic linker can be:
+/// - Standard: ld-musl-*.so.1
+/// - Ubuntu musl-tools: /usr/lib/aarch64-linux-musl/libc.so (resolved symlink)
+pub fn find_musl_debug_address(pid: i32) -> Result<usize> {
+    use goblin::elf::Elf;
+    use procfs::process::{MMapPath, Process};
+
+    let proc = Process::new(pid).context("Failed to open process")?;
+    let maps = proc.maps().context("Failed to read memory maps")?;
+
+    // Find musl's dynamic linker in the memory maps
+    for map in maps.iter() {
+        if let MMapPath::Path(ref path) = map.pathname {
+            let path_str = path.to_string_lossy();
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            // Match musl dynamic linker paths
+            let is_musl_linker = filename.starts_with("ld-musl")
+                || (path_str.contains("-linux-musl/") && filename == "libc.so");
+
+            if is_musl_linker {
+                debug!("Found musl dynamic linker: {:?}", path);
+
+                // Read and parse the dynamic linker
+                let buffer = std::fs::read(path).context("Failed to read musl dynamic linker")?;
+                let elf = Elf::parse(&buffer).context("Failed to parse musl dynamic linker ELF")?;
+
+                // Look for _dl_debug_addr in dynamic symbols
+                for sym in elf.dynsyms.iter() {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if name == "_dl_debug_addr" {
+                            debug!("Found _dl_debug_addr symbol at offset: {:#x}", sym.st_value);
+
+                            // ld-musl is ET_DYN, need to add base address
+                            let base = map.address.0 as usize;
+                            let addr = base + sym.st_value as usize;
+                            debug!("_dl_debug_addr address: {:#x} (base {:#x} + offset {:#x})", addr, base, sym.st_value);
+                            return Ok(addr);
+                        }
+                    }
+                }
+
+                return Err(anyhow!("_dl_debug_addr symbol not found in musl dynamic linker {:?}", path));
+            }
+        }
+    }
+
+    Err(anyhow!("musl dynamic linker not found in process memory maps"))
+}
+
+/// Walk musl's DSO chain and return all loaded libraries
+pub fn walk_musl_dso_chain(pid: i32, debug_addr: usize) -> Result<Vec<LoadedLibrary>> {
+    // _dl_debug_addr is a pointer to struct debug, so we need to read it first
+    let mut ptr_buffer = [0u8; std::mem::size_of::<usize>()];
+    read_memory(pid, debug_addr, &mut ptr_buffer)?;
+    let debug_struct_addr = usize::from_ne_bytes(ptr_buffer);
+
+    debug!("musl _dl_debug_addr points to debug struct at {:#x}", debug_struct_addr);
+
+    // Read the debug structure
+    let musl_debug = read_musl_debug(pid, debug_struct_addr)?;
+    debug!("musl debug: ver={}, head={:#x}, state={}", musl_debug.ver, musl_debug.head, musl_debug.state);
+
+    let mut libraries = Vec::new();
+    let mut current_addr = musl_debug.head;
+    let mut position = 1;
+
+    // Walk the linked list
+    while current_addr != 0 {
+        let dso_header = read_musl_dso_header(pid, current_addr)?;
+
+        // Read tls_id from the DSO structure
+        let tls_id = read_musl_tls_id(pid, current_addr)?;
+
+        debug!(
+            "musl dso_header: base={:#x}, name_ptr={:#x}, next={:#x}",
+            dso_header.base, dso_header.name, dso_header.next
+        );
+
+        // Read the library name
+        let name = if dso_header.name != 0 {
+            match read_string_from_process(pid, dso_header.name) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Failed to read DSO name from {:#x}: {}", dso_header.name, e);
+                    String::from("<error reading name>")
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        debug!(
+            "musl dso[{}]: base={:#x}, tls_id={}, next={:#x}, name={:?}",
+            position, dso_header.base, tls_id, dso_header.next, name
+        );
+
+        // Add to list
+        if !name.is_empty() {
+            libraries.push(LoadedLibrary {
+                path: PathBuf::from(&name),
+                base_address: dso_header.base,
+                module_id: tls_id,
+                tls_offset: 0, // musl doesn't expose l_tls_offset equivalent
+            });
+        } else if position == 1 {
+            // First entry is main executable
+            use procfs::process::Process;
+            let proc = Process::new(pid)?;
+            let exe_path = proc.exe()?;
+            libraries.push(LoadedLibrary {
+                path: exe_path,
+                base_address: dso_header.base,
+                module_id: tls_id,
+                tls_offset: 0,
+            });
+        }
+
+        current_addr = dso_header.next;
+        position += 1;
+
+        // Sanity check
+        if position > 10000 {
+            return Err(anyhow!("Suspiciously large number of DSOs in musl chain; giving up"));
+        }
+    }
+
+    debug!("Found {} loaded libraries (musl)", libraries.len());
+    Ok(libraries)
+}
+
+/// Read musl's debug structure from process memory
+fn read_musl_debug(pid: i32, addr: usize) -> Result<MuslDebug> {
+    let mut buffer = [0u8; std::mem::size_of::<MuslDebug>()];
+    read_memory(pid, addr, &mut buffer)?;
+
+    let debug = unsafe {
+        std::ptr::read_unaligned(buffer.as_ptr() as *const MuslDebug)
+    };
+
+    Ok(debug)
+}
+
+/// Read musl's dso header from process memory
+fn read_musl_dso_header(pid: i32, addr: usize) -> Result<MuslDsoHeader> {
+    let mut buffer = [0u8; std::mem::size_of::<MuslDsoHeader>()];
+    read_memory(pid, addr, &mut buffer)?;
+
+    let dso = unsafe {
+        std::ptr::read_unaligned(buffer.as_ptr() as *const MuslDsoHeader)
+    };
+
+    Ok(dso)
+}
+
+/// Read tls_id from musl's struct dso
+fn read_musl_tls_id(pid: i32, dso_addr: usize) -> Result<usize> {
+    let field_addr = dso_addr + MUSL_DSO_TLS_ID_OFFSET;
+    let mut buffer = [0u8; std::mem::size_of::<usize>()];
+    read_memory(pid, field_addr, &mut buffer)?;
+    let tls_id = usize::from_ne_bytes(buffer);
+
+    debug!("musl dso {:#x}: tls_id at offset {:#x} = {}",
+           dso_addr, MUSL_DSO_TLS_ID_OFFSET, tls_id);
+
+    Ok(tls_id)
+}
+
+/// Resolve TLS info using musl's DSO chain
+fn resolve_tls_info_musl(pid: i32, library_path: &Path) -> Result<TlsResolution> {
+    let debug_addr = find_musl_debug_address(pid)
+        .context("Failed to find musl _dl_debug_addr")?;
+    let libraries = walk_musl_dso_chain(pid, debug_addr)
+        .context("Failed to walk musl DSO chain")?;
+
+    find_library_in_list(&libraries, library_path)
 }

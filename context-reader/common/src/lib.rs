@@ -44,6 +44,18 @@ pub enum ReaderMode {
     V2Only = 2,
 }
 
+/// C library type for TLS layout differences.
+/// glibc and musl have different DTV (Dynamic Thread Vector) layouts:
+/// - DTV pointer location relative to thread pointer
+/// - DTV entry size (glibc: 16 bytes, musl: 8 bytes)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibcType {
+    #[default]
+    Glibc = 0,
+    Musl = 1,
+}
+
 impl ReaderMode {
     /// Returns true if V1 reading is enabled
     #[inline]
@@ -156,8 +168,11 @@ pub struct TlsConfig {
     /// Non-zero if eBPF should use static TLS for shared libraries (fast path)
     /// Set by userspace based on whether tls_offset is valid
     pub use_static_tls: u8,
+    /// C library type: 0 = glibc, 1 = musl
+    /// Affects DTV pointer location and entry size in eBPF
+    pub libc_type: u8,
     /// Padding for alignment
-    pub _pad: [u8; 6],
+    pub _pad: [u8; 5],
     /// Maximum size of V2 records (from process context)
     /// Set to 0 for V1 (not applicable)
     pub max_record_size: u64,
@@ -233,6 +248,7 @@ mod std_impls {
                 .field("tls_offset", &format_args!("{:#x}", self.tls_offset))
                 .field("is_main_executable", &(self.is_main_executable != 0))
                 .field("use_static_tls", &(self.use_static_tls != 0))
+                .field("libc_type", &if self.libc_type == 1 { "musl" } else { "glibc" })
                 .field("max_record_size", &self.max_record_size)
                 .finish()
         }

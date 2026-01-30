@@ -376,11 +376,27 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
 
 /// Configure V1 and V2 TLS maps with discovered symbol locations
 fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Result<()> {
+    // Detect libc type once for this process
+    let libc_type = match crate::tls_symbols::dynamic_linker::detect_libc(pid) {
+        Ok(crate::tls_symbols::dynamic_linker::Libc::Musl) => {
+            debug!("Detected musl libc for pid {}", pid);
+            1u8
+        }
+        Ok(crate::tls_symbols::dynamic_linker::Libc::Glibc) => {
+            debug!("Detected glibc for pid {}", pid);
+            0u8
+        }
+        Err(e) => {
+            warn!("Failed to detect libc type, defaulting to glibc: {}", e);
+            0u8 // Default to glibc
+        }
+    };
+
     // Try to find V1 symbols (only if V1 reader is enabled)
     if reader_mode.v1_enabled() {
         if let Ok(found) = find_known_symbols_in_process(pid, &[V1_SYMBOL]) {
             let location = found.tls_location_for(V1_SYMBOL)?;
-            let config = tls_location_to_config(&location.tls_location, 0); // V1 doesn't use fixed-size records
+            let config = tls_location_to_config(&location.tls_location, 0, libc_type); // V1 doesn't use fixed-size records
 
             let mut v1_config: HashMap<_, u32, TlsConfig> =
                 HashMap::try_from(bpf.map_mut("V1_TLS_CONFIG").context("V1_TLS_CONFIG map not found")?)?;
@@ -414,7 +430,7 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
                 }
             };
 
-            let config = tls_location_to_config(&location.tls_location, max_record_size);
+            let config = tls_location_to_config(&location.tls_location, max_record_size, libc_type);
 
             let mut v2_config: HashMap<_, u32, TlsConfig> =
                 HashMap::try_from(bpf.map_mut("V2_TLS_CONFIG").context("V2_TLS_CONFIG map not found")?)?;
@@ -434,7 +450,7 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
 }
 
 /// Convert TlsLocation to TlsConfig for BPF map
-fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsConfig {
+fn tls_location_to_config(location: &TlsLocation, max_record_size: u64, libc_type: u8) -> TlsConfig {
     match location {
         TlsLocation::MainExecutable { offset } => TlsConfig {
             module_id: 0,
@@ -442,7 +458,8 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
             tls_offset: 0,  // Not used for main executable
             is_main_executable: 1,
             use_static_tls: 0,  // Not applicable for main executable
-            _pad: [0; 6],
+            libc_type,
+            _pad: [0; 5],
             max_record_size,
         },
         TlsLocation::SharedLibrary { module_id, offset, tls_offset, .. } => {
@@ -455,7 +472,8 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64) -> TlsCo
                 tls_offset: *tls_offset as u64,
                 is_main_executable: 0,
                 use_static_tls: if use_static { 1 } else { 0 },
-                _pad: [0; 6],
+                libc_type,
+                _pad: [0; 5],
                 max_record_size,
             }
         },

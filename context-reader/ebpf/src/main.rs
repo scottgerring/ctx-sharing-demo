@@ -203,28 +203,37 @@ fn compute_tls_via_dtv(
     config: &TlsConfig,
     arch: Architecture,
 ) -> Result<u64, i64> {
-    // DTV pointer location varies by architecture due to different tcbhead_t layouts:
-    //
-    // glibc x86-64
-    //   DTV is at offset 8 (second field)
-    //
-    // glibc aarch64
-    //   DTV is at offset 0 (first field)
-    let dtv_offset: u64 = match arch {
-        Architecture::X86_64 => 8,
-        Architecture::Aarch64 => 0,
+    // DTV pointer location varies by libc and architecture
+    let dtv_ptr_addr: u64 = if config.libc_type == 1 {
+        // musl
+        match arch {
+            // musl x86_64: DTV at TP + 8 (same as glibc)
+            Architecture::X86_64 => thread_pointer + 8,
+            // musl aarch64: DTV at TP - 8 (end of pthread struct, before TP)
+            Architecture::Aarch64 => thread_pointer.wrapping_sub(8),
+        }
+    } else {
+        // glibc (default)
+        match arch {
+            // glibc x86_64: DTV at TP + 8 (second field of tcbhead_t)
+            Architecture::X86_64 => thread_pointer + 8,
+            // glibc aarch64: DTV at TP + 0 (first field of tcbhead_t)
+            Architecture::Aarch64 => thread_pointer,
+        }
     };
-    let dtv_ptr: u64 = unsafe {
-        bpf_probe_read_user((thread_pointer + dtv_offset) as *const u64).map_err(|e| e as i64)?
-    };
+
+    let dtv_ptr: u64 =
+        unsafe { bpf_probe_read_user(dtv_ptr_addr as *const u64).map_err(|e| e as i64)? };
 
     if dtv_ptr == 0 {
         return Err(-1);
     }
 
-    // DTV entry size is 16 bytes on 64-bit
-    const DTV_ENTRY_SIZE: u64 = 16;
-    let dtv_entry_addr = dtv_ptr + (config.module_id * DTV_ENTRY_SIZE);
+    // DTV entry size: glibc uses 16 bytes, musl uses 8 bytes
+    // glibc DTV entry: { void *val; void *to_free; } = 16 bytes
+    // musl DTV entry: just a void* pointer = 8 bytes
+    let dtv_entry_size: u64 = if config.libc_type == 1 { 8 } else { 16 };
+    let dtv_entry_addr = dtv_ptr + (config.module_id * dtv_entry_size);
 
     // Read TLS block pointer from DTV entry
     let tls_block: u64 =

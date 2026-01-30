@@ -73,12 +73,18 @@ static void *worker_thread(void *arg) {
 /**
  * Get the path to libcustomlabels.so relative to the executable.
  * The binary is at simple-writer/build/<name> and the library is at
- * custom-labels/libcustomlabels.so, so the relative path from the
- * binary's directory is ../../custom-labels/libcustomlabels.so
+ * custom-labels/libcustomlabels.so (or libcustomlabels-musl.so for musl builds).
+ *
+ * The relative path from the binary's directory is:
+ * ../../custom-labels/libcustomlabels.so (glibc)
+ * ../../custom-labels/libcustomlabels-musl.so (musl)
+ *
+ * We detect musl by checking if the binary name contains "-musl".
  */
 static char *get_library_path(void) {
     static char lib_path[PATH_MAX];
     char exe_path[PATH_MAX];
+    char exe_path_copy[PATH_MAX];
 
     // Read the executable's path from /proc/self/exe
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -88,11 +94,22 @@ static char *get_library_path(void) {
     }
     exe_path[len] = '\0';
 
+    // Make a copy for basename (it may modify the string)
+    strncpy(exe_path_copy, exe_path, sizeof(exe_path_copy) - 1);
+    exe_path_copy[sizeof(exe_path_copy) - 1] = '\0';
+    char *exe_name = basename(exe_path_copy);
+
     // Get the directory containing the executable
     char *exe_dir = dirname(exe_path);
 
-    // Construct path: <exe_dir>/../../custom-labels/libcustomlabels.so
-    snprintf(lib_path, sizeof(lib_path), "%s/../../custom-labels/libcustomlabels.so", exe_dir);
+    // Determine library name based on binary name
+    const char *lib_name = "libcustomlabels.so";
+    if (strstr(exe_name, "-musl") != NULL) {
+        lib_name = "libcustomlabels-musl.so";
+    }
+
+    // Construct path: <exe_dir>/../../custom-labels/<lib_name>
+    snprintf(lib_path, sizeof(lib_path), "%s/../../custom-labels/%s", exe_dir, lib_name);
 
     return lib_path;
 }

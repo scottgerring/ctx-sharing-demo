@@ -29,7 +29,7 @@ PROCESS_CTX_SRC = process_context.c
 # All targets
 TARGETS = simple-writer-static-musl simple-writer-static-glibc \
           simple-writer-dynamic-glibc \
-          simple-writer-dlopen-glibc \
+          simple-writer-dlopen-glibc simple-writer-dlopen-musl \
           simple-writer-exhaust-static-tls
 
 .PHONY: all clean $(TARGETS)
@@ -74,6 +74,12 @@ simple-writer-dlopen-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-o $(BUILD_DIR)/$@ $(DLOPEN_SRC) $(BUILD_DIR)/process_context-glibc.o \
 		-ldl -lpthread
+
+# Variant 5: dlopen + musl (load library at runtime with dlopen under musl)
+# musl provides dlopen/pthread in libc directly, no need for -ldl -lpthread
+simple-writer-dlopen-musl: $(BUILD_DIR)/process_context-musl.o
+	musl-gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
+		-o $(BUILD_DIR)/$@ $(DLOPEN_SRC) $(BUILD_DIR)/process_context-musl.o
 
 # Variant 6: exhaust-static-tls (dlopen filler first to force DTV usage)
 # This variant loads a TLS filler library before custom-labels to exhaust
