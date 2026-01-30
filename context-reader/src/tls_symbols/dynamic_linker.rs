@@ -581,6 +581,16 @@ struct MuslDsoHeader {
 /// this isn't possible from eBPF. We're stuck with hardcoded offsets here - would
 /// be happy to be wrong!
 ///
+/// Note: Unlike glibc, musl does not reserve "surplus" static TLS space for
+/// libraries loaded via dlopen(). In musl, only libraries present at program
+/// startup receive static TLS offsets; any library loaded afterward is assigned
+/// a tls_id greater than static_tls_cnt and must use the Dynamic Thread Vector
+/// (DTV) for TLS access. This means TLSDESC relocations for dlopen'd libraries
+/// will always resolve to __tlsdesc_dynamic rather than __tlsdesc_static.
+/// See:
+/// - Static TLS cutoff: https://github.com/kraj/musl/blob/ff441c9ddfefbb94e5881ddd5112b24a944dc36c/ldso/dynlink.c#L2024
+/// - TLSDESC selection: https://github.com/kraj/musl/blob/ff441c9ddfefbb94e5881ddd5112b24a944dc36c/ldso/dynlink.c#L520-L541
+///
 /// These offsets were determined empirically for musl 1.2.x and may need
 /// adjustment for other versions.
 #[cfg(target_arch = "aarch64")]
