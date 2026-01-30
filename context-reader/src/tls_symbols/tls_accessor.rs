@@ -340,22 +340,20 @@ fn get_tls_via_dtv_with_tp(
     module_id: usize,
     tls_offset: usize,
 ) -> Result<usize> {
-    // Read the DTV pointer from the thread control block
-    // The offset differs by architecture due to different tcbhead_t layouts:
-    //
-    // glibc x86-64 tcbhead_t (sysdeps/x86_64/nptl/tls.h):
-    //   typedef struct { void *tcb; dtv_t *dtv; void *self; ... } tcbhead_t;
-    //   DTV is at offset 8 (second field)
-    //
-    // glibc aarch64 tcbhead_t (sysdeps/aarch64/nptl/tls.h):
-    //   typedef struct { dtv_t *dtv; void *private; } tcbhead_t;
-    //   DTV is at offset 0 (first field)
+    use super::dynamic_linker::{detect_libc, Libc};
 
+    // Detect libc type (cached after first call)
+    let libc = detect_libc(pid).unwrap_or(Libc::Glibc);
+
+    // DTV pointer location varies by libc and architecture
     #[cfg(target_arch = "x86_64")]
-    let dtv_ptr_addr = thread_pointer + 8;  // DTV is second field in tcbhead_t
+    let dtv_ptr_addr = thread_pointer + 8;  // x86_64: DTV at TP + 8 for both glibc and musl
 
     #[cfg(target_arch = "aarch64")]
-    let dtv_ptr_addr = thread_pointer;  // DTV is first field in tcbhead_t
+    let dtv_ptr_addr = match libc {
+        Libc::Musl => thread_pointer.wrapping_sub(8),  // musl aarch64: DTV at TP - 8
+        Libc::Glibc => thread_pointer,                  // glibc aarch64: DTV at TP + 0
+    };
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let dtv_ptr_addr = {
@@ -374,15 +372,14 @@ fn get_tls_via_dtv_with_tp(
         anyhow::bail!("DTV pointer is null");
     }
 
-    // DTV layout in glibc:
-    // dtv[0] = generation counter
-    // dtv[1] = first module's TLS block
-    // dtv[module_id] = this module's TLS block
-    //
-    // IMPORTANT: Each dtv_t entry is 16 bytes on 64-bit systems, not 8!
-    // The structure is: struct { void *val; bool is_static; } with padding
-    const DTV_ENTRY_SIZE: usize = 16;  // sizeof(dtv_t) on 64-bit
-    let dtv_entry_addr = dtv_ptr + (module_id * DTV_ENTRY_SIZE);
+    // DTV entry size differs by libc:
+    // - glibc: 16 bytes (struct { void *val; void *to_free; })
+    // - musl: 8 bytes (just a void* pointer)
+    let dtv_entry_size: usize = match libc {
+        Libc::Musl => 8,
+        Libc::Glibc => 16,
+    };
+    let dtv_entry_addr = dtv_ptr + (module_id * dtv_entry_size);
 
     debug!(
         "Reading DTV entry at {:#x} for module {}",
