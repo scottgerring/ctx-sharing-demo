@@ -68,14 +68,11 @@ fn main() {
         .with_resource("service.name", "context-writer")
         .with_resource("service.version", "1.0.0")
         .with_resource("deployment.environment", "development")
-        .with_tls_config(
-            [
-                (METHOD_IDX, "method"),
-                (ROUTE_IDX, "route"),
-                (USER_IDX, "user"),
-            ],
-            MAX_RECORD_SIZE,
-        );
+        .with_tls_config([
+            (METHOD_IDX, "method"),
+            (ROUTE_IDX, "route"),
+            (USER_IDX, "user"),
+        ]);
 
     // Publish the process context (Linux only, no-op on other platforms)
     let _writer = match ProcessContextWriter::publish(&ctx) {

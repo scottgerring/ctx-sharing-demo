@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use custom_labels::process_context::ProcessContext;
 use custom_labels::v2::process_context_ext::TlsConfig;
-use custom_labels::v2::reader::{ParsedRecord, ParseError};
+use custom_labels::v2::reader::{ParsedRecord, ParseError, V2_HEADER_SIZE};
 use tracing::{debug, info};
 
 use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
@@ -24,7 +24,6 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[CUSTOM_LABELS_CURRENT_SET_V2];
 pub struct V2Reader {
     library: LoadedTlsSymbol,
     key_table: Vec<String>,
-    max_record_size: u64,
 }
 
 impl V2Reader {
@@ -36,7 +35,6 @@ impl V2Reader {
 
         info!(
             num_keys = tls_config.key_table.len(),
-            max_record_size = tls_config.max_record_size,
             "V2 reader: parsed key table from process-context"
         );
         for (idx, name) in tls_config.key_table.iter().enumerate() {
@@ -66,7 +64,6 @@ impl V2Reader {
         Ok(Self {
             library,
             key_table: tls_config.key_table,
-            max_record_size: tls_config.max_record_size,
         })
     }
 }
@@ -110,7 +107,9 @@ impl V2Reader {
         self.parse_record(&record_buf)
     }
 
-    /// Read the raw record bytes from process memory.
+    /// Read the raw record bytes from process memory using a two-read approach:
+    /// 1. Read the fixed 28-byte header to get validity and attrs_data_size
+    /// 2. If valid and attrs_data_size > 0, read the attribute bytes
     /// Returns None if the record pointer is null.
     fn read_record_memory(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<u8>>> {
         debug!("V2 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
@@ -135,11 +134,37 @@ impl V2Reader {
             return Ok(None);
         }
 
-        // Read the full record (up to max_record_size)
-        let mut record_buf = vec![0u8; self.max_record_size as usize];
-        read_memory(pid, record_ptr, &mut record_buf)?;
+        // Read 1: fixed 28-byte header
+        let mut header_buf = vec![0u8; V2_HEADER_SIZE];
+        read_memory(pid, record_ptr, &mut header_buf)?;
 
-        Ok(Some(record_buf))
+        // Check valid flag (byte 24) before reading more
+        let valid = header_buf[24];
+        if valid != 1 {
+            return Ok(Some(header_buf)); // Let ParsedRecord::parse handle the error
+        }
+
+        // Extract attrs_data_size (bytes 26-27, little-endian u16)
+        let attrs_data_size = u16::from_le_bytes([header_buf[26], header_buf[27]]) as usize;
+
+        // Sanity check: reject obviously corrupt sizes
+        const MAX_ATTRS_SIZE: usize = 65536;
+        if attrs_data_size > MAX_ATTRS_SIZE {
+            anyhow::bail!(
+                "attrs_data_size {} exceeds maximum {}",
+                attrs_data_size,
+                MAX_ATTRS_SIZE
+            );
+        }
+
+        if attrs_data_size > 0 {
+            // Read 2: attribute data
+            let mut attrs_buf = vec![0u8; attrs_data_size];
+            read_memory(pid, record_ptr + V2_HEADER_SIZE, &mut attrs_buf)?;
+            header_buf.extend(attrs_buf);
+        }
+
+        Ok(Some(header_buf))
     }
 
     /// Parse a v2 TL record from raw bytes and convert to Labels

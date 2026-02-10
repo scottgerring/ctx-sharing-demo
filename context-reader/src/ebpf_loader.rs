@@ -12,8 +12,6 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use context_reader_common::{is_valid_static_tls_offset, KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
-use custom_labels::process_context;
-use custom_labels::v2::process_context_ext::TlsConfig as V2TlsConfigExt;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -396,7 +394,7 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
     if reader_mode.v1_enabled() {
         if let Ok(found) = find_known_symbols_in_process(pid, &[V1_SYMBOL]) {
             let location = found.tls_location_for(V1_SYMBOL)?;
-            let config = tls_location_to_config(&location.tls_location, 0, libc_type); // V1 doesn't use fixed-size records
+            let config = tls_location_to_config(&location.tls_location, libc_type);
 
             let mut v1_config: HashMap<_, u32, TlsConfig> =
                 HashMap::try_from(bpf.map_mut("V1_TLS_CONFIG").context("V1_TLS_CONFIG map not found")?)?;
@@ -417,20 +415,7 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
         if let Ok(found) = find_known_symbols_in_process(pid, &[V2_SYMBOL]) {
             let location = found.tls_location_for(V2_SYMBOL)?;
 
-            // Read process context to get V2 max_record_size
-            let max_record_size = match process_context::read_process_context_from_pid(pid) {
-                Ok(proc_ctx) => {
-                    V2TlsConfigExt::from_process_context(&proc_ctx)
-                        .map(|cfg| cfg.max_record_size)
-                        .unwrap_or(256) // Default if not found
-                }
-                Err(e) => {
-                    warn!("Failed to read V2 process context: {}", e);
-                    256 // Default size
-                }
-            };
-
-            let config = tls_location_to_config(&location.tls_location, max_record_size, libc_type);
+            let config = tls_location_to_config(&location.tls_location, libc_type);
 
             let mut v2_config: HashMap<_, u32, TlsConfig> =
                 HashMap::try_from(bpf.map_mut("V2_TLS_CONFIG").context("V2_TLS_CONFIG map not found")?)?;
@@ -450,7 +435,7 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
 }
 
 /// Convert TlsLocation to TlsConfig for BPF map
-fn tls_location_to_config(location: &TlsLocation, max_record_size: u64, libc_type: u8) -> TlsConfig {
+fn tls_location_to_config(location: &TlsLocation, libc_type: u8) -> TlsConfig {
     match location {
         TlsLocation::MainExecutable { offset } => TlsConfig {
             module_id: 0,
@@ -460,7 +445,6 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64, libc_typ
             use_static_tls: 0,  // Not applicable for main executable
             libc_type,
             _pad: [0; 5],
-            max_record_size,
         },
         TlsLocation::SharedLibrary { module_id, offset, tls_offset, .. } => {
             // Determine if eBPF should use static TLS based on tls_offset validity
@@ -474,7 +458,6 @@ fn tls_location_to_config(location: &TlsLocation, max_record_size: u64, libc_typ
                 use_static_tls: if use_static { 1 } else { 0 },
                 libc_type,
                 _pad: [0; 5],
-                max_record_size,
             }
         },
     }

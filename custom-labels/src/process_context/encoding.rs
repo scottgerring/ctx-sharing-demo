@@ -194,19 +194,41 @@ fn validate_kv(kv: &KeyValue) -> Result<()> {
 // Main encode function
 // =============================================================================
 
-/// Encode a ProcessContext to protobuf bytes
+/// Encode a ProcessContext to protobuf bytes.
+///
+/// The payload is a ProcessContext message:
+///   field 1 (LEN): Resource { field 1 (LEN, repeated): KeyValue }
+///   field 2 (LEN, repeated): KeyValue extra_attributes
 pub fn encode(ctx: &ProcessContext) -> Result<Vec<u8>> {
     // Validate all resources
     for kv in &ctx.resources {
         validate_kv(kv)?;
     }
+    // Validate all extra attributes
+    for kv in &ctx.extra_attributes {
+        validate_kv(kv)?;
+    }
 
     let mut buf = Vec::new();
 
-    // Write all attributes as Resource.attributes (field 1)
-    for kv in &ctx.resources {
+    // Encode Resource as field 1 of ProcessContext
+    if !ctx.resources.is_empty() {
+        let mut resource_buf = Vec::new();
+        for kv in &ctx.resources {
+            let kv_bytes = encode_keyvalue(kv);
+            write_tag_len(&mut resource_buf, 1); // Resource.attributes = field 1
+            write_varint(&mut resource_buf, kv_bytes.len() as u16);
+            resource_buf.extend(kv_bytes);
+        }
+        write_tag_len(&mut buf, 1); // ProcessContext.resource = field 1
+        write_varint(&mut buf, resource_buf.len() as u16);
+        buf.extend(resource_buf);
+    }
+
+    // Encode extra_attributes as field 2 of ProcessContext (repeated)
+    for kv in &ctx.extra_attributes {
         let kv_bytes = encode_keyvalue(kv);
-        write_tag_len(&mut buf, 1);
+        write_tag_len(&mut buf, 2); // ProcessContext.extra_attributes = field 2
         write_varint(&mut buf, kv_bytes.len() as u16);
         buf.extend(kv_bytes);
     }
@@ -431,7 +453,11 @@ fn decode_keyvalue(reader: &mut Reader, len: usize) -> Result<KeyValue> {
     Ok(KeyValue { key, value })
 }
 
-/// Decode protobuf bytes to a ProcessContext
+/// Decode protobuf bytes to a ProcessContext.
+///
+/// The payload is a ProcessContext message:
+///   field 1 (LEN): Resource { field 1 (LEN, repeated): KeyValue }
+///   field 2 (LEN, repeated): KeyValue extra_attributes
 pub fn decode(data: &[u8]) -> Result<ProcessContext> {
     let mut ctx = ProcessContext::new();
     let mut reader = Reader::new(data);
@@ -439,16 +465,42 @@ pub fn decode(data: &[u8]) -> Result<ProcessContext> {
     while reader.remaining() > 0 {
         let (field_number, wire_type) = reader.read_tag_full()?;
 
-        if field_number != 1 || wire_type != WIRE_TYPE_LEN {
+        if wire_type != WIRE_TYPE_LEN {
             return Err(Error::DecodingFailed(format!(
-                "expected Resource.attributes field 1, got field {} wire_type {}",
-                field_number, wire_type
+                "expected LEN wire type, got wire_type {}",
+                wire_type
             )));
         }
 
-        let kv_len = reader.read_varint()? as usize;
-        let kv = decode_keyvalue(&mut reader, kv_len)?;
-        ctx.resources.push(kv);
+        let field_len = reader.read_varint()? as usize;
+
+        match field_number {
+            1 => {
+                // ProcessContext.resource = Resource message
+                let resource_end = reader.pos + field_len;
+                while reader.pos < resource_end {
+                    let (inner_field, inner_wire) = reader.read_tag_full()?;
+                    if inner_field != 1 || inner_wire != WIRE_TYPE_LEN {
+                        return Err(Error::DecodingFailed(format!(
+                            "expected Resource.attributes field 1, got field {} wire_type {}",
+                            inner_field, inner_wire
+                        )));
+                    }
+                    let kv_len = reader.read_varint()? as usize;
+                    let kv = decode_keyvalue(&mut reader, kv_len)?;
+                    ctx.resources.push(kv);
+                }
+            }
+            2 => {
+                // ProcessContext.extra_attributes = KeyValue
+                let kv = decode_keyvalue(&mut reader, field_len)?;
+                ctx.extra_attributes.push(kv);
+            }
+            _ => {
+                // Skip unknown fields
+                reader.skip_bytes(field_len)?;
+            }
+        }
     }
 
     Ok(ctx)
@@ -477,8 +529,8 @@ mod tests {
     #[test]
     fn test_roundtrip_int_values() {
         let ctx = ProcessContext::new()
-            .with_resource("threadlocal.schema_version", Value::Int(1))
-            .with_resource("threadlocal.max_record_size", Value::Int(512));
+            .with_resource("process.pid", Value::Int(1234))
+            .with_resource("host.cpu.count", Value::Int(8));
 
         let encoded = encode(&ctx).unwrap();
         let decoded = decode(&encoded).unwrap();
@@ -493,7 +545,7 @@ mod tests {
             KeyValue::string("2", "user_id"),
         ];
         let ctx = ProcessContext::new()
-            .with_resource("threadlocal.attribute_key_map", Value::KvList(kvlist));
+            .with_resource("some.kvlist", Value::KvList(kvlist));
 
         let encoded = encode(&ctx).unwrap();
         let decoded = decode(&encoded).unwrap();
@@ -503,7 +555,7 @@ mod tests {
     #[test]
     fn test_roundtrip_array() {
         let ctx = ProcessContext::new().with_resource(
-            "threadlocal.attribute_key_map",
+            "some.array",
             Value::Array(vec![
                 Value::String("http_route".to_string()),
                 Value::String("http_method".to_string()),
@@ -517,13 +569,23 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_full_threadlocal_config() {
-        // Updated to use the new spec format: schema_version as string, key_map as array
+    fn test_roundtrip_extra_attributes() {
+        let ctx = ProcessContext::new()
+            .with_extra_attribute("threadlocal.schema_version", "tlsdesc_v1_dev")
+            .with_extra_attribute("some.int_attr", Value::Int(64));
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_resources_and_extra_attributes() {
         let ctx = ProcessContext::new()
             .with_resource("service.name", "test-service")
-            .with_resource("threadlocal.schema_version", "tlsdesc_v1_dev")
-            .with_resource("threadlocal.max_record_size", Value::Int(64))
-            .with_resource(
+            .with_extra_attribute("threadlocal.schema_version", "tlsdesc_v1_dev")
+            .with_extra_attribute("some.int_attr", Value::Int(64))
+            .with_extra_attribute(
                 "threadlocal.attribute_key_map",
                 Value::Array(vec![
                     Value::String("http_route".to_string()),
@@ -538,11 +600,33 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_empty_resources() {
+        let ctx = ProcessContext::new()
+            .with_extra_attribute("foo", "bar");
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_empty_extra_attributes() {
+        let ctx = ProcessContext::new()
+            .with_resource("service.name", "test");
+
+        let encoded = encode(&ctx).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(ctx, decoded);
+    }
+
+    #[test]
     fn test_string_too_long() {
         let long_string = "x".repeat(KEY_VALUE_LIMIT + 1);
-        let ctx = ProcessContext::new().with_resource("key", long_string);
-        let result = encode(&ctx);
-        assert!(matches!(result, Err(Error::StringTooLong { .. })));
+        let ctx = ProcessContext::new().with_resource("key", long_string.clone());
+        assert!(matches!(encode(&ctx), Err(Error::StringTooLong { .. })));
+
+        let ctx2 = ProcessContext::new().with_extra_attribute("key", long_string);
+        assert!(matches!(encode(&ctx2), Err(Error::StringTooLong { .. })));
     }
 
     #[test]

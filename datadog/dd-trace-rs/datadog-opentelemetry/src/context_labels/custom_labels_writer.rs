@@ -48,7 +48,7 @@ impl CustomLabelsWriter {
 
         let ctx = ProcessContext::new()
             .with_resource("service.name", "datadog-otel")
-            .with_tls_config(keys, V2_MAX_RECORD_SIZE);
+            .with_tls_config(keys);
 
         match ProcessContextWriter::publish(&ctx) {
             Ok(writer) => {

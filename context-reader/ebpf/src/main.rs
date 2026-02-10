@@ -14,7 +14,7 @@ use aya_ebpf::{
 use aya_log_ebpf::debug;
 use context_reader_common::{
     calculate_static_tls_address, Architecture, KernelOffsets, LabelEvent, ReaderMode, TlsConfig,
-    MAX_LABEL_DATA_SIZE,
+    MAX_LABEL_DATA_SIZE, V2_HEADER_SIZE,
 };
 
 /// Target PID we're monitoring (set by userspace)
@@ -399,7 +399,11 @@ fn read_and_emit_v1(
     Ok(())
 }
 
-/// Read V2 format labels and emit to ringbuf
+/// Read V2 format labels and emit to ringbuf.
+///
+/// Uses a two-stage read approach:
+/// 1. Read the fixed 28-byte header to get validity and attrs_data_size
+/// 2. If valid and attrs_data_size > 0, read the attribute bytes
 #[inline(always)]
 fn read_and_emit_v2(
     ctx: &PerfEventContext,
@@ -426,11 +430,40 @@ fn read_and_emit_v2(
     let scratch = unsafe { SCRATCH.get_ptr_mut(0).ok_or(-1)? };
     let scratch = unsafe { &mut *scratch };
 
-    // Read V2 record using the actual max_record_size from config
-    let read_size = (config.max_record_size as usize).min(MAX_LABEL_DATA_SIZE);
+    // Stage 1: Read the fixed 28-byte header
     unsafe {
-        bpf_probe_read_user_buf(record_ptr as *const u8, &mut scratch[..read_size])
+        bpf_probe_read_user_buf(
+            record_ptr as *const u8,
+            &mut scratch[..V2_HEADER_SIZE],
+        )
+        .map_err(|e| e as i64)?;
+    }
+
+    // Check valid flag (byte 24) - skip if not 1
+    if scratch[24] != 1 {
+        return Ok(());
+    }
+
+    // Extract attrs_data_size from header (bytes 26-27, little-endian u16)
+    let attrs_data_size = (scratch[26] as usize) | ((scratch[27] as usize) << 8);
+
+    // Total record size = header + attribute data
+    let total_size = V2_HEADER_SIZE + attrs_data_size;
+
+    // Bound to scratch buffer capacity
+    if total_size > MAX_LABEL_DATA_SIZE {
+        return Err(-1);
+    }
+
+    // Stage 2: Read attribute data (if any)
+    if attrs_data_size > 0 {
+        unsafe {
+            bpf_probe_read_user_buf(
+                (record_ptr + V2_HEADER_SIZE as u64) as *const u8,
+                &mut scratch[V2_HEADER_SIZE..total_size],
+            )
             .map_err(|e| e as i64)?;
+        }
     }
 
     let end_time = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
@@ -439,7 +472,7 @@ fn read_and_emit_v2(
         ctx,
         tid,
         2,
-        &scratch[..read_size],
+        &scratch[..total_size],
         record_ptr,
         start_time,
         end_time,

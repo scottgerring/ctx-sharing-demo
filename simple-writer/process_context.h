@@ -27,7 +27,7 @@ extern const uint8_t SPAN_ID[8];
  * Publish process-context with our standard configuration.
  *
  * Creates an anonymous mmap with OTEL_CTX signature so context-reader
- * can discover our v2 configuration (max_record_size, key mappings).
+ * can discover our v2 configuration (schema version, key mappings).
  *
  * @return Pointer to the mmap region, or NULL on failure
  */

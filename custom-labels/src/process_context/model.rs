@@ -144,11 +144,12 @@ impl KeyValue {
 
 /// Process context data that can be published and read.
 ///
-/// This is a simple collection of key-value resource attributes.
-/// Use `with_resource` to add any attribute you need.
+/// Contains OTEL resource attributes and optional extra attributes
+/// for implementation-specific metadata (e.g. threadlocal config).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessContext {
     pub resources: Vec<KeyValue>,
+    pub extra_attributes: Vec<KeyValue>,
 }
 
 impl ProcessContext {
@@ -159,6 +160,12 @@ impl ProcessContext {
     /// Add a resource attribute (key-value pair).
     pub fn with_resource(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.resources.push(KeyValue::new(key, value));
+        self
+    }
+
+    /// Add an extra attribute (non-resource key-value pair).
+    pub fn with_extra_attribute(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.extra_attributes.push(KeyValue::new(key, value));
         self
     }
 }

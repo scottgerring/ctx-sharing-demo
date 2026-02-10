@@ -50,7 +50,6 @@ static const size_t KEY_COUNT = 3;
  * Minimal protobuf encoder
  * ============================================================================ */
 
-#define WIRE_TYPE_VARINT 0
 #define WIRE_TYPE_LEN 2
 
 typedef struct {
@@ -85,37 +84,7 @@ static void pb_write_string(pb_writer_t *w, const char *s) {
     }
 }
 
-static void pb_write_kv_int(pb_writer_t *w, const char *key, int64_t val) {
-    pb_writer_t kv_buf = {NULL, 0, 0};
-    uint8_t kv_data[256];
-    kv_buf.buf = kv_data;
-    kv_buf.cap = sizeof(kv_data);
-
-    pb_write_tag(&kv_buf, 1, WIRE_TYPE_LEN);
-    pb_write_string(&kv_buf, key);
-
-    pb_writer_t any_buf = {NULL, 0, 0};
-    uint8_t any_data[64];
-    any_buf.buf = any_data;
-    any_buf.cap = sizeof(any_data);
-
-    pb_write_tag(&any_buf, 3, WIRE_TYPE_VARINT);
-    pb_write_varint_u64(&any_buf, val);
-
-    pb_write_tag(&kv_buf, 2, WIRE_TYPE_LEN);
-    pb_write_varint_u64(&kv_buf, any_buf.pos);
-    for (size_t i = 0; i < any_buf.pos; i++) {
-        pb_write_byte(&kv_buf, any_buf.buf[i]);
-    }
-
-    pb_write_tag(w, 1, WIRE_TYPE_LEN);
-    pb_write_varint_u64(w, kv_buf.pos);
-    for (size_t i = 0; i < kv_buf.pos; i++) {
-        pb_write_byte(w, kv_buf.buf[i]);
-    }
-}
-
-static void pb_write_kv_str(pb_writer_t *w, const char *key, const char *val) {
+static void pb_write_kv_str(pb_writer_t *w, uint8_t outer_field, const char *key, const char *val) {
     pb_writer_t kv_buf = {NULL, 0, 0};
     uint8_t kv_data[256];
     kv_buf.buf = kv_data;
@@ -139,14 +108,14 @@ static void pb_write_kv_str(pb_writer_t *w, const char *key, const char *val) {
         pb_write_byte(&kv_buf, any_buf.buf[i]);
     }
 
-    pb_write_tag(w, 1, WIRE_TYPE_LEN);
+    pb_write_tag(w, outer_field, WIRE_TYPE_LEN);
     pb_write_varint_u64(w, kv_buf.pos);
     for (size_t i = 0; i < kv_buf.pos; i++) {
         pb_write_byte(w, kv_buf.buf[i]);
     }
 }
 
-static void pb_write_kv_array(pb_writer_t *w, const char *key,
+static void pb_write_kv_array(pb_writer_t *w, uint8_t outer_field, const char *key,
                               const char **values, size_t count) {
     // Build ArrayValue: repeated AnyValue values = field 1
     pb_writer_t array_buf = {NULL, 0, 0};
@@ -199,7 +168,7 @@ static void pb_write_kv_array(pb_writer_t *w, const char *key,
         pb_write_byte(&kv_buf, any_buf.buf[i]);
     }
 
-    pb_write_tag(w, 1, WIRE_TYPE_LEN);
+    pb_write_tag(w, outer_field, WIRE_TYPE_LEN);
     pb_write_varint_u64(w, kv_buf.pos);
     for (size_t i = 0; i < kv_buf.pos; i++) {
         pb_write_byte(w, kv_buf.buf[i]);
@@ -284,9 +253,9 @@ void *publish_process_context(void) {
     size_t payload_cap = mapping_size - sizeof(process_ctx_header_t);
 
     pb_writer_t w = {payload, 0, payload_cap};
-    pb_write_kv_str(&w, "threadlocal.schema_version", "tlsdesc_v1_dev");
-    pb_write_kv_int(&w, "threadlocal.max_record_size", MAX_RECORD_SIZE);
-    pb_write_kv_array(&w, "threadlocal.attribute_key_map", KEY_NAMES, KEY_COUNT);
+    /* threadlocal.* keys go to extra_attributes (field 2 of ProcessContext) */
+    pb_write_kv_str(&w, 2, "threadlocal.schema_version", "tlsdesc_v1_dev");
+    pb_write_kv_array(&w, 2, "threadlocal.attribute_key_map", KEY_NAMES, KEY_COUNT);
 
     if (w.pos >= w.cap) {
         fprintf(stderr, "ERROR: Payload buffer overflow\n");

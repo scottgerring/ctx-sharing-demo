@@ -152,6 +152,10 @@ pub fn compute_tls_address_static(thread_pointer: u64, offset: u64) -> u64 {
     calculate_static_tls_address(thread_pointer, offset, CURRENT_ARCH)
 }
 
+/// V2 TLS record header size (fixed portion).
+/// Layout: trace_id[16] | span_id[8] | valid[1] | _reserved[1] | attrs_data_size[2]
+pub const V2_HEADER_SIZE: usize = 28;
+
 /// TLS configuration for a symbol.
 /// Passed from userspace to BPF via map.
 #[repr(C)]
@@ -173,9 +177,6 @@ pub struct TlsConfig {
     pub libc_type: u8,
     /// Padding for alignment
     pub _pad: [u8; 5],
-    /// Maximum size of V2 records (from process context)
-    /// Set to 0 for V1 (not applicable)
-    pub max_record_size: u64,
 }
 
 /// Kernel structure offsets for thread pointer access.
@@ -249,7 +250,6 @@ mod std_impls {
                 .field("is_main_executable", &(self.is_main_executable != 0))
                 .field("use_static_tls", &(self.use_static_tls != 0))
                 .field("libc_type", &if self.libc_type == 1 { "musl" } else { "glibc" })
-                .field("max_record_size", &self.max_record_size)
                 .finish()
         }
     }

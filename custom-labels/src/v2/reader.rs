@@ -4,7 +4,7 @@
 //! from raw bytes.
 
 /// V2 TL record header size (fixed portion).
-/// Layout: trace_id[16] | span_id[8] | valid[1] | _padding[1] | attrs_data_size[2]
+/// Layout: trace_id[16] | span_id[8] | valid[1] | _reserved[1] | attrs_data_size[2]
 pub const V2_HEADER_SIZE: usize = 16 + 8 + 1 + 1 + 2; // 28 bytes
 
 /// Errors that can occur when parsing a v2 TLS record.
@@ -59,11 +59,11 @@ impl ParsedRecord {
         span_id.copy_from_slice(&data[16..24]);
 
         let valid = data[24];
-        // data[25] is padding byte, skip it
+        // data[25] is reserved byte, skip it
         let attrs_data_size = u16::from_le_bytes([data[26], data[27]]);
 
-        // If not valid, return error
-        if valid == 0 {
+        // Per spec: "Consumers should ignore this record if any other value is set"
+        if valid != 1 {
             return Err(ParseError::NotValid);
         }
 
@@ -116,7 +116,7 @@ mod tests {
         data[16..24].copy_from_slice(&[2u8; 8]);
         // valid = 1 (byte 24)
         data[24] = 1;
-        // _padding (byte 25) - implicit zero
+        // _reserved (byte 25) - implicit zero
         // attrs_data_size = 10 (2 attrs, each 5 bytes: key+len+3 bytes value)
         // bytes 26-27 (little-endian u16)
         data[26] = 10;
@@ -141,9 +141,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_invalid_record() {
+    fn test_parse_invalid_record_zero() {
         let mut data = vec![0u8; 64];
         data[24] = 0; // valid = 0
+
+        let result = ParsedRecord::parse(&data);
+        assert_eq!(result, Err(ParseError::NotValid));
+    }
+
+    #[test]
+    fn test_parse_invalid_record_nonone() {
+        let mut data = vec![0u8; 64];
+        data[24] = 2; // valid != 1
 
         let result = ParsedRecord::parse(&data);
         assert_eq!(result, Err(ParseError::NotValid));
