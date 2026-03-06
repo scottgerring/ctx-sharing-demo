@@ -88,8 +88,8 @@ fn is_otel_mapping_candidate(line: &str, page_size: usize) -> bool {
 #[cfg(target_os = "linux")]
 fn is_named_otel_mapping(line: &str) -> bool {
     let trimmed = line.trim_end();
-    // Check for anonymous naming: [anon:OTEL_CTX]
-    if trimmed.ends_with("[anon:OTEL_CTX]") {
+    // Check for anonymous naming: [anon:OTEL_CTX] or [anon_shmem:OTEL_CTX]
+    if trimmed.ends_with("[anon:OTEL_CTX]") || trimmed.ends_with("[anon_shmem:OTEL_CTX]") {
         return true;
     }
     // Check for memfd naming: /memfd:OTEL_CTX (possibly with " (deleted)" suffix)
