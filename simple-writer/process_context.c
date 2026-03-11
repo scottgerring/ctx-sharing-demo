@@ -276,7 +276,12 @@ void *publish_process_context(void) {
 
     /* Write monotonic_published_at_ns last to signal the mapping is valid */
     struct timespec ts;
-    clock_gettime(CLOCK_BOOTTIME, &ts);
+    if (clock_gettime(CLOCK_BOOTTIME, &ts) == -1) {
+        perror("clock_gettime(CLOCK_BOOTTIME)");
+        munmap(mapping, mapping_size);
+        if (memfd >= 0) close(memfd);
+        return NULL;
+    }
     hdr->monotonic_published_at_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 
     /* PR #34: Removed mprotect to read-only - mapping stays writable for in-place updates */
