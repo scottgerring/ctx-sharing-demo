@@ -8,7 +8,7 @@ use std::ptr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{fence, Ordering};
 #[cfg(target_os = "linux")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use libc::timespec;
 
 use tracing::info;
 
@@ -46,7 +46,7 @@ struct MappingHeader {
     signature: [u8; 8],
     version: u32,
     payload_size: u32,
-    published_at_ns: u64,
+    monotonic_published_at_ns: u64,
     payload_ptr: *const u8,
 }
 
@@ -60,20 +60,23 @@ fn mapping_size() -> Result<usize> {
     Ok(page_size as usize)
 }
 
-/// Get current time in nanoseconds since epoch
+/// Get a monotonic timestamp in nanoseconds from CLOCK_BOOTTIME.
+/// Returns 0 on failure (callers treat 0 as "not yet ready").
 #[cfg(target_os = "linux")]
-fn time_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+fn monotonic_now_ns() -> u64 {
+    let mut ts: timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) } == -1 {
+        return 0;
+    }
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Result of create_mapping: the mapping pointer and optional memfd
+/// Result of create_mapping: the mapping pointer.
+/// Any memfd file descriptor is closed immediately after mmap —
+/// the mapping keeps the underlying resource alive.
 #[cfg(target_os = "linux")]
 struct MappingResult {
     mapping: *mut c_void,
-    memfd: Option<i32>,
 }
 
 /// Create the memory mapping, trying memfd first, then falling back to anonymous.
@@ -118,11 +121,10 @@ fn create_mapping(size: usize) -> Result<MappingResult> {
             };
 
             if mapping != MAP_FAILED {
+                // Close fd immediately — the mapping keeps the resource alive
+                unsafe { close(fd) };
                 info!("Created memfd mapping (will appear as /memfd:OTEL_CTX in maps)");
-                return Ok(MappingResult {
-                    mapping,
-                    memfd: Some(fd),
-                });
+                return Ok(MappingResult { mapping });
             }
 
             // mmap failed, close fd and fall through to anonymous
@@ -150,10 +152,7 @@ fn create_mapping(size: usize) -> Result<MappingResult> {
     }
 
     info!("Created anonymous mapping");
-    Ok(MappingResult {
-        mapping,
-        memfd: None,
-    })
+    Ok(MappingResult { mapping })
 }
 
 /// Writer for publishing process context.
@@ -174,7 +173,6 @@ pub struct ProcessContextWriter {
     mapping_size: usize,
     payload: Vec<u8>,
     publisher_pid: libc::pid_t,
-    memfd: Option<i32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -189,6 +187,15 @@ impl ProcessContextWriter {
     /// This is NOT thread-safe!
     pub fn publish(ctx: &ProcessContext) -> Result<Self> {
         info!("Publishing process context");
+
+        // Get timestamp first — fail early before allocating resources
+        let ts = monotonic_now_ns();
+        if ts == 0 {
+            return Err(Error::MappingFailed(
+                "monotonic clock returned zero".to_string(),
+            ));
+        }
+
         let size = mapping_size()?;
 
         // Encode the payload
@@ -196,71 +203,53 @@ impl ProcessContextWriter {
         info!(payload_size = payload.len(), "Encoded process context payload");
 
         // Create mapping (memfd preferred, fallback to anonymous)
-        let MappingResult { mapping, memfd } = create_mapping(size)?;
+        let MappingResult { mapping } = create_mapping(size)?;
         info!(mapping_addr = ?mapping, mapping_size = size, "Created mapping");
 
         // Set MADV_DONTFORK so children don't inherit this mapping
         if unsafe { madvise(mapping, size, MADV_DONTFORK) } == -1 {
-            if let Some(fd) = memfd {
-                unsafe { close(fd) };
-            }
             unsafe { munmap(mapping, size) };
             return Err(Error::MappingFailed(
                 "madvise MADV_DONTFORK failed".to_string(),
             ));
         }
 
-        let published_at_ns = time_now_ns();
-        if published_at_ns == 0 {
-            if let Some(fd) = memfd {
-                unsafe { close(fd) };
-            }
-            unsafe { munmap(mapping, size) };
-            return Err(Error::MappingFailed(
-                "failed to get current time".to_string(),
-            ));
-        }
-
-        // Write the header (without signature first)
+        // Write header fields (signature, version, payload_size, payload)
+        // but NOT monotonic_published_at_ns yet — it is the validity gate.
         let header = mapping as *mut MappingHeader;
         unsafe {
-            (*header).signature = [0; 8]; // Will be set after fence
+            ptr::copy_nonoverlapping(SIGNATURE.as_ptr(), (*header).signature.as_mut_ptr(), 8);
             (*header).version = PROCESS_CTX_VERSION;
             (*header).payload_size = payload.len() as u32;
-            (*header).published_at_ns = published_at_ns;
+            (*header).monotonic_published_at_ns = 0; // not yet valid
             (*header).payload_ptr = payload.as_ptr();
         }
 
-        // Memory fence to ensure header is written before signature
+        // Memory fence to ensure all header fields are visible before the timestamp
         fence(Ordering::SeqCst);
 
-        // Now write the signature
+        // Write monotonic_published_at_ns last to signal the mapping is valid
         unsafe {
-            ptr::copy_nonoverlapping(SIGNATURE.as_ptr(), (*header).signature.as_mut_ptr(), 8);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, ts);
         }
         info!("Wrote header with signature OTEL_CTX");
 
-        // NOTE: We no longer make the mapping read-only (removed mprotect call)
-        // This allows in-place updates via the update() method
-
-        // For anonymous mappings, try to name it (optional, may fail on older kernels)
-        // memfd mappings don't need this - the name shows in /proc/pid/maps automatically
-        if memfd.is_none() {
-            let name = b"OTEL_CTX\0";
-            let prctl_result = unsafe {
-                prctl(
-                    PR_SET_VMA,
-                    PR_SET_VMA_ANON_NAME,
-                    mapping,
-                    size,
-                    name.as_ptr(),
-                )
-            };
-            if prctl_result == 0 {
-                info!("Named mapping [anon:OTEL_CTX]");
-            } else {
-                info!("Could not name mapping (older kernel), will be discoverable by signature");
-            }
+        // Try to name the mapping so outside readers can find it
+        let name = b"OTEL_CTX\0";
+        let prctl_result = unsafe {
+            prctl(
+                PR_SET_VMA,
+                PR_SET_VMA_ANON_NAME,
+                mapping,
+                size,
+                name.as_ptr(),
+            )
+        };
+        if prctl_result == 0 {
+            info!("Named mapping [anon:OTEL_CTX]");
+        } else {
+            info!("Could not name mapping (older kernel), will be discoverable by signature");
         }
 
         info!("Process context published successfully");
@@ -269,20 +258,19 @@ impl ProcessContextWriter {
             mapping_size: size,
             payload,
             publisher_pid: unsafe { libc::getpid() },
-            memfd,
         })
     }
 
     /// Update the process context in place.
     ///
-    /// This uses the atomic update protocol from PR #34:
-    /// 1. Zero `published_at_ns` to signal update in progress
+    /// This uses the atomic update protocol:
+    /// 1. Zero `monotonic_published_at_ns` to signal update in progress
     /// 2. Memory fence
     /// 3. Update payload pointer and size
     /// 4. Memory fence
-    /// 5. Write new timestamp to signal completion
+    /// 5. Write new monotonic timestamp (must be strictly after previous value)
     ///
-    /// Readers should check if `published_at_ns == 0` and retry/skip.
+    /// Readers should check if `monotonic_published_at_ns == 0` and retry/skip.
     ///
     /// # Safety
     ///
@@ -296,11 +284,16 @@ impl ProcessContextWriter {
 
         let header = self.mapping as *mut MappingHeader;
 
-        // Step 1: Zero published_at_ns to signal update in progress
-        // Use raw pointer arithmetic to avoid taking reference to packed struct field
+        // Read the current timestamp before zeroing so we can enforce ordering
+        let prev_ts = unsafe {
+            let ts_ptr = ptr::addr_of!((*header).monotonic_published_at_ns);
+            ptr::read_volatile(ts_ptr)
+        };
+
+        // Step 1: Zero monotonic_published_at_ns to signal update in progress
         unsafe {
-            let published_at_ns_ptr = ptr::addr_of_mut!((*header).published_at_ns);
-            ptr::write_volatile(published_at_ns_ptr, 0);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, 0);
         }
 
         // Step 2: Memory fence
@@ -316,16 +309,14 @@ impl ProcessContextWriter {
         // Step 4: Memory fence
         fence(Ordering::SeqCst);
 
-        // Step 5: Write new timestamp to signal completion
-        let published_at_ns = time_now_ns();
-        if published_at_ns == 0 {
-            return Err(Error::MappingFailed(
-                "failed to get current time".to_string(),
-            ));
+        // Step 5: Write new monotonic timestamp — must be strictly after previous
+        let mut ts = monotonic_now_ns();
+        if ts <= prev_ts {
+            ts = prev_ts + 1;
         }
         unsafe {
-            let published_at_ns_ptr = ptr::addr_of_mut!((*header).published_at_ns);
-            ptr::write_volatile(published_at_ns_ptr, published_at_ns);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, ts);
         }
 
         info!("Process context updated successfully");
@@ -346,11 +337,6 @@ impl ProcessContextWriter {
         if current_pid == self.publisher_pid {
             if unsafe { munmap(self.mapping, self.mapping_size) } == -1 {
                 return Err(Error::MappingFailed("munmap failed".to_string()));
-            }
-
-            // Close memfd if we have one
-            if let Some(fd) = self.memfd.take() {
-                unsafe { close(fd) };
             }
         }
 
