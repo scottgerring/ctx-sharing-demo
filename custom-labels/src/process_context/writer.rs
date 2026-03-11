@@ -8,7 +8,7 @@ use std::ptr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{fence, Ordering};
 #[cfg(target_os = "linux")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use libc::timespec;
 
 use tracing::info;
 
@@ -46,7 +46,7 @@ struct MappingHeader {
     signature: [u8; 8],
     version: u32,
     payload_size: u32,
-    published_at_ns: u64,
+    monotonic_published_at_ns: u64,
     payload_ptr: *const u8,
 }
 
@@ -60,13 +60,15 @@ fn mapping_size() -> Result<usize> {
     Ok(page_size as usize)
 }
 
-/// Get current time in nanoseconds since epoch
+/// Get a monotonic timestamp in nanoseconds from CLOCK_BOOTTIME.
+/// Returns 0 on failure (callers treat 0 as "not yet ready").
 #[cfg(target_os = "linux")]
-fn time_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+fn monotonic_now_ns() -> u64 {
+    let mut ts: timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) } == -1 {
+        return 0;
+    }
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
 /// Result of create_mapping: the mapping pointer and optional memfd
@@ -210,33 +212,34 @@ impl ProcessContextWriter {
             ));
         }
 
-        let published_at_ns = time_now_ns();
-        if published_at_ns == 0 {
+        // Write header fields (signature, version, payload_size, payload)
+        // but NOT monotonic_published_at_ns yet — it is the validity gate.
+        let header = mapping as *mut MappingHeader;
+        unsafe {
+            ptr::copy_nonoverlapping(SIGNATURE.as_ptr(), (*header).signature.as_mut_ptr(), 8);
+            (*header).version = PROCESS_CTX_VERSION;
+            (*header).payload_size = payload.len() as u32;
+            (*header).monotonic_published_at_ns = 0; // not yet valid
+            (*header).payload_ptr = payload.as_ptr();
+        }
+
+        // Memory fence to ensure all header fields are visible before the timestamp
+        fence(Ordering::SeqCst);
+
+        // Write monotonic_published_at_ns last to signal the mapping is valid
+        let ts = monotonic_now_ns();
+        if ts == 0 {
             if let Some(fd) = memfd {
                 unsafe { close(fd) };
             }
             unsafe { munmap(mapping, size) };
             return Err(Error::MappingFailed(
-                "failed to get current time".to_string(),
+                "monotonic clock returned zero".to_string(),
             ));
         }
-
-        // Write the header (without signature first)
-        let header = mapping as *mut MappingHeader;
         unsafe {
-            (*header).signature = [0; 8]; // Will be set after fence
-            (*header).version = PROCESS_CTX_VERSION;
-            (*header).payload_size = payload.len() as u32;
-            (*header).published_at_ns = published_at_ns;
-            (*header).payload_ptr = payload.as_ptr();
-        }
-
-        // Memory fence to ensure header is written before signature
-        fence(Ordering::SeqCst);
-
-        // Now write the signature
-        unsafe {
-            ptr::copy_nonoverlapping(SIGNATURE.as_ptr(), (*header).signature.as_mut_ptr(), 8);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, ts);
         }
         info!("Wrote header with signature OTEL_CTX");
 
@@ -275,14 +278,14 @@ impl ProcessContextWriter {
 
     /// Update the process context in place.
     ///
-    /// This uses the atomic update protocol from PR #34:
-    /// 1. Zero `published_at_ns` to signal update in progress
+    /// This uses the atomic update protocol:
+    /// 1. Zero `monotonic_published_at_ns` to signal update in progress
     /// 2. Memory fence
     /// 3. Update payload pointer and size
     /// 4. Memory fence
-    /// 5. Write new timestamp to signal completion
+    /// 5. Write new monotonic timestamp (must be strictly after previous value)
     ///
-    /// Readers should check if `published_at_ns == 0` and retry/skip.
+    /// Readers should check if `monotonic_published_at_ns == 0` and retry/skip.
     ///
     /// # Safety
     ///
@@ -296,11 +299,16 @@ impl ProcessContextWriter {
 
         let header = self.mapping as *mut MappingHeader;
 
-        // Step 1: Zero published_at_ns to signal update in progress
-        // Use raw pointer arithmetic to avoid taking reference to packed struct field
+        // Read the current timestamp before zeroing so we can enforce ordering
+        let prev_ts = unsafe {
+            let ts_ptr = ptr::addr_of!((*header).monotonic_published_at_ns);
+            ptr::read_volatile(ts_ptr)
+        };
+
+        // Step 1: Zero monotonic_published_at_ns to signal update in progress
         unsafe {
-            let published_at_ns_ptr = ptr::addr_of_mut!((*header).published_at_ns);
-            ptr::write_volatile(published_at_ns_ptr, 0);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, 0);
         }
 
         // Step 2: Memory fence
@@ -316,16 +324,14 @@ impl ProcessContextWriter {
         // Step 4: Memory fence
         fence(Ordering::SeqCst);
 
-        // Step 5: Write new timestamp to signal completion
-        let published_at_ns = time_now_ns();
-        if published_at_ns == 0 {
-            return Err(Error::MappingFailed(
-                "failed to get current time".to_string(),
-            ));
+        // Step 5: Write new monotonic timestamp — must be strictly after previous
+        let mut ts = monotonic_now_ns();
+        if ts <= prev_ts {
+            ts = prev_ts + 1;
         }
         unsafe {
-            let published_at_ns_ptr = ptr::addr_of_mut!((*header).published_at_ns);
-            ptr::write_volatile(published_at_ns_ptr, published_at_ns);
+            let ts_ptr = ptr::addr_of_mut!((*header).monotonic_published_at_ns);
+            ptr::write_volatile(ts_ptr, ts);
         }
 
         info!("Process context updated successfully");

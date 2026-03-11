@@ -183,7 +183,7 @@ typedef struct {
     uint8_t signature[8];
     uint32_t version;
     uint32_t payload_size;
-    uint64_t published_at_ns;
+    uint64_t monotonic_published_at_ns;
     void *payload_ptr;
 } __attribute__((packed)) process_ctx_header_t;
 
@@ -264,18 +264,20 @@ void *publish_process_context(void) {
         return NULL;
     }
 
-    memset(hdr->signature, 0, 8);
+    /* Write signature, version, payload_size, payload — but NOT
+     * monotonic_published_at_ns yet; it is the validity gate. */
+    memcpy(hdr->signature, "OTEL_CTX", 8);
     hdr->version = 2;
     hdr->payload_size = w.pos;
-
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    hdr->published_at_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    hdr->monotonic_published_at_ns = 0; /* not yet valid */
     hdr->payload_ptr = payload;
 
     __sync_synchronize();
 
-    memcpy(hdr->signature, "OTEL_CTX", 8);
+    /* Write monotonic_published_at_ns last to signal the mapping is valid */
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    hdr->monotonic_published_at_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 
     /* PR #34: Removed mprotect to read-only - mapping stays writable for in-place updates */
 

@@ -20,7 +20,7 @@ struct MappingHeader {
     signature: [u8; 8],
     version: u32,
     payload_size: u32,
-    published_at_ns: u64,
+    monotonic_published_at_ns: u64,
     payload_ptr: *const u8,
 }
 
@@ -166,7 +166,7 @@ fn find_otel_mapping() -> Result<usize> {
 /// Returns the decoded `ProcessContext` if found, or an error if:
 /// - No OTEL_CTX mapping was found
 /// - The mapping has an invalid signature or version
-/// - An update is in progress (`published_at_ns == 0`)
+/// - An update is in progress (`monotonic_published_at_ns == 0`)
 /// - The payload failed to decode
 #[cfg(target_os = "linux")]
 pub fn read_process_context() -> Result<ProcessContext> {
@@ -175,13 +175,13 @@ pub fn read_process_context() -> Result<ProcessContext> {
 
     // Read and validate header
     // Safety: We found this address in /proc/self/maps and verified the signature
-    let (signature, version, payload_size, published_at_ns, payload_ptr) = unsafe {
+    let (signature, version, payload_size, monotonic_published_at_ns, payload_ptr) = unsafe {
         let header = std::ptr::read_volatile(header_ptr);
         (
             header.signature,
             header.version,
             header.payload_size,
-            header.published_at_ns,
+            header.monotonic_published_at_ns,
             header.payload_ptr,
         )
     };
@@ -192,7 +192,7 @@ pub fn read_process_context() -> Result<ProcessContext> {
     }
 
     // Check for update in progress (PR #34 protocol)
-    if published_at_ns == 0 {
+    if monotonic_published_at_ns == 0 {
         return Err(Error::DecodingFailed("update in progress".to_string()));
     }
 
@@ -308,7 +308,7 @@ fn find_otel_mapping_for_pid(pid: i32) -> Result<usize> {
 /// - No OTEL_CTX mapping was found
 /// - Failed to read from the target process
 /// - The mapping has an invalid signature or version
-/// - An update is in progress (`published_at_ns == 0`)
+/// - An update is in progress (`monotonic_published_at_ns == 0`)
 /// - The payload failed to decode
 #[cfg(target_os = "linux")]
 pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
@@ -349,7 +349,7 @@ pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
     let signature: [u8; 8] = header_buf[0..8].try_into().unwrap();
     let version = u32::from_ne_bytes(header_buf[8..12].try_into().unwrap());
     let payload_size = u32::from_ne_bytes(header_buf[12..16].try_into().unwrap());
-    let published_at_ns = u64::from_ne_bytes(header_buf[16..24].try_into().unwrap());
+    let monotonic_published_at_ns = u64::from_ne_bytes(header_buf[16..24].try_into().unwrap());
     let payload_ptr =
         usize::from_ne_bytes(header_buf[24..24 + size_of::<usize>()].try_into().unwrap());
 
@@ -359,9 +359,16 @@ pub fn read_process_context_from_pid(pid: i32) -> Result<ProcessContext> {
     }
 
     // Check for update in progress (PR #34 protocol)
-    if published_at_ns == 0 {
+    if monotonic_published_at_ns == 0 {
         return Err(Error::DecodingFailed("update in progress".to_string()));
     }
+
+    tracing::info!(
+        monotonic_published_at_ns,
+        version,
+        payload_size,
+        "Read process-context header"
+    );
 
     // Validate version
     if version != PROCESS_CTX_VERSION {
