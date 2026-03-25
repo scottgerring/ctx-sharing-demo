@@ -28,7 +28,7 @@ PROCESS_CTX_SRC = process_context.c
 
 # All targets
 TARGETS = simple-writer-static-musl simple-writer-static-glibc \
-          simple-writer-dynamic-glibc \
+          simple-writer-dynamic-glibc simple-writer-dynamic-musl \
           simple-writer-dlopen-glibc simple-writer-dlopen-musl \
           simple-writer-exhaust-static-tls
 
@@ -66,6 +66,16 @@ simple-writer-dynamic-glibc: $(BUILD_DIR)/process_context-glibc.o
 	gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
 		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-glibc.o \
 		-L../custom-labels -lcustomlabels \
+		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
+		$(EXPORT_SYMBOLS)
+
+# Variant 3b: Dynamic labels + musl
+# musl has supported aarch64 since v1.1.7 (March 2015) and TLSDESC on
+# i386/x86_64 since v1.1.3 (June 2014).
+simple-writer-dynamic-musl: $(BUILD_DIR)/process_context-musl.o
+	musl-gcc $(COMMON_CFLAGS) $(COMMON_TLS_FLAGS) \
+		-o $(BUILD_DIR)/$@ $(MAIN_SRC) $(BUILD_DIR)/process_context-musl.o \
+		-L../custom-labels -lcustomlabels-musl \
 		-Wl,-rpath,'$$ORIGIN/../../custom-labels' \
 		$(EXPORT_SYMBOLS)
 

@@ -7,10 +7,12 @@ We have variants that exercise the combinations of **linking mode of the TLS lib
 
 | Binary | Labels | libc | Notes |
 |--------|--------|------|---------------------|
-| `simple-writer-static-musl` | static | musl | Will always land in static TLS block |
+| `simple-writer-static-musl` | static | musl | Will always land in static TLS block. Note: statically-linked musl binaries cannot `dlopen()` external libraries (it's a no-op stub), so there is no musl equivalent of `exhaust-static-tls` |
 | `simple-writer-static-glibc` | static | glibc | Will always land in static TLS block |
 | `simple-writer-dynamic-glibc` | dynamic | glibc | Will always land in static TLS block (because we compile the lib with TLSDESC) |
+| `simple-writer-dynamic-musl` | dynamic | musl | Same as glibc variant; musl has supported [aarch64 since v1.1.7 (March 2015)](https://musl.libc.org/releases.html) and [TLSDESC on i386/x86_64 since v1.1.3 (June 2014)](https://musl.libc.org/releases.html) |
 | `simple-writer-dlopen-glibc` | dlopen | glibc | _Will generally_ land in static TLS block due to reserved TL storage |
+| `simple-writer-dlopen-musl` | dlopen | musl | Loaded at runtime via `dlopen()`; musl dynamic linker handles TLS allocation |
 | `simple-writer-exhaust-static-tls` | dlopen | glibc | Uses another library to exhaust static TL block buffer before loading labels library; labels library will be forced into DTV |
 
 ## Files

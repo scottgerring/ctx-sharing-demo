@@ -28,8 +28,10 @@ is_valid_combination() {
     local labels=$1
     local clib=$2
 
-    # musl supports static and dlopen (dynamic linking not yet supported)
-    if [[ "$clib" == "musl" && "$labels" != "static" && "$labels" != "dlopen" ]]; then
+    # musl supports static, dynamic, and dlopen.
+    # musl has supported aarch64 since v1.1.7 (March 2015) and TLSDESC on
+    # i386/x86_64 since v1.1.3 (June 2014). exhaust-static-tls is glibc-only.
+    if [[ "$clib" == "musl" && "$labels" == "exhaust-static-tls" ]]; then
         return 1
     fi
     return 0
@@ -47,7 +49,7 @@ build_variant() {
     if [[ "$labels" == "static" ]]; then
         make libcustomlabels.a >/dev/null 2>&1
     elif [[ "$clib" == "musl" ]]; then
-        # musl dlopen needs the musl-specific shared library
+        # musl variants (dlopen, dynamic) need the musl-specific shared library
         make libcustomlabels-musl.so >/dev/null 2>&1
     else
         make libcustomlabels.so >/dev/null 2>&1
