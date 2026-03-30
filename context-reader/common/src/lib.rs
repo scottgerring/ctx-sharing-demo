@@ -285,7 +285,7 @@ mod tests {
     fn test_x86_64_static_tls_offset_with_pt_tls() {
         // Real example from context-writer:
         // PT_TLS p_memsz = 0x158 (344 bytes)
-        // custom_labels_current_set_v2 st_value = 0x110 (272)
+        // otel_thread_ctx_v1 st_value = 0x110 (272)
         // Correct behavior: offset = tls_block_size - st_value = 0x158 - 0x110 = 0x48
         let offset = calculate_static_tls_offset(0x110, Some(0x158), Architecture::X86_64);
         assert_eq!(offset, 0x48);

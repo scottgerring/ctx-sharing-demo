@@ -8,7 +8,7 @@ Demonstrates reading and writing thread-local observability context (trace IDs, 
 
 Fork of [polarsignals/custom-labels](https://github.com/polarsignals/custom-labels) with two additions:
 
-1. **v2 TLS format** - Adds `custom_labels_current_set_v2` symbol supporting arbitrary string attributes plus trace context. See [custom-labels/README.md](custom-labels/README.md).
+1. **v2 TLS format** - Adds `otel_thread_ctx_v1` symbol supporting arbitrary string attributes plus trace context. See [custom-labels/README.md](custom-labels/README.md).
 
 2. **Process Context** - Rust implementation of [OTEP-4719](https://github.com/open-telemetry/opentelemetry-specification/pull/4719) for publishing key tables via named memory mappings.
 

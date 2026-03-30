@@ -9,7 +9,7 @@
 static uint64_t g_max_record_size = 0;
 
 __attribute__((retain))
-__thread custom_labels_v2_tl_record_t *custom_labels_current_set_v2 = NULL;
+__thread custom_labels_v2_tl_record_t *otel_thread_ctx_v1 = NULL;
 
 void custom_labels_v2_setup(uint64_t max_record_size) {
     g_max_record_size = max_record_size;
@@ -93,18 +93,18 @@ int custom_labels_v2_record_set_attr(
 custom_labels_v2_tl_record_t *custom_labels_v2_set_current_record(
     custom_labels_v2_tl_record_t *new_record
 ) {
-    custom_labels_v2_tl_record_t *old_record = custom_labels_current_set_v2;
+    custom_labels_v2_tl_record_t *old_record = otel_thread_ctx_v1;
     BARRIER;
-    custom_labels_current_set_v2 = new_record;
+    otel_thread_ctx_v1 = new_record;
     BARRIER;
     return old_record;
 }
 
 custom_labels_v2_tl_record_t *custom_labels_v2_get_current_record(void) {
-    return custom_labels_current_set_v2;
+    return otel_thread_ctx_v1;
 }
 
 // Debug helper: get the address of the TLS variable itself (not its value)
 void *custom_labels_v2_get_tls_address(void) {
-    return (void *)&custom_labels_current_set_v2;
+    return (void *)&otel_thread_ctx_v1;
 }

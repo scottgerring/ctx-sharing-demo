@@ -15,7 +15,7 @@ COMMON_TLS_FLAGS = -ftls-model=global-dynamic -mtls-dialect=$(TLS_DIALECT)
 
 # Export TLS symbols for context-reader access
 EXPORT_SYMBOLS = -Wl,--export-dynamic-symbol=custom_labels_abi_version \
-                 -Wl,--export-dynamic-symbol=custom_labels_current_set_v2
+                 -Wl,--export-dynamic-symbol=otel_thread_ctx_v1
 
 # Build directory
 BUILD_DIR = build

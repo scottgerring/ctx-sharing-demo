@@ -15,10 +15,10 @@ use crate::tls_symbols::process::{FoundSymbols, LoadedTlsSymbol};
 use crate::tls_symbols::tls_accessor;
 
 // V2 symbol name
-pub const CUSTOM_LABELS_CURRENT_SET_V2: &str = "custom_labels_current_set_v2";
+pub const OTEL_THREAD_CTX_V1: &str = "otel_thread_ctx_v1";
 
 /// Symbols required for V2 reader
-pub const REQUIRED_SYMBOLS: &[&str] = &[CUSTOM_LABELS_CURRENT_SET_V2];
+pub const REQUIRED_SYMBOLS: &[&str] = &[OTEL_THREAD_CTX_V1];
 
 /// V2 TLS Reader for the binary TL record format
 pub struct V2Reader {
@@ -53,12 +53,12 @@ impl V2Reader {
 
         info!(
             "V2 reader: found {} in {}",
-            CUSTOM_LABELS_CURRENT_SET_V2,
+            OTEL_THREAD_CTX_V1,
             found.path.display()
         );
 
         let library = found
-            .tls_location_for(CUSTOM_LABELS_CURRENT_SET_V2)
+            .tls_location_for(OTEL_THREAD_CTX_V1)
             .context("Failed to compute TLS location for v2")?;
 
         Ok(Self {

@@ -37,7 +37,7 @@ typedef struct {
     uint8_t attrs_data[];
 } custom_labels_v2_tl_record_t;
 
-extern __thread custom_labels_v2_tl_record_t *custom_labels_current_set_v2;
+extern __thread custom_labels_v2_tl_record_t *otel_thread_ctx_v1;
 
 // Initialize custom labels with the maximum record size.
 // Must be called once before using any other v2 functions.

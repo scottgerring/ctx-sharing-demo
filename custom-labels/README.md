@@ -6,7 +6,7 @@ the original README and all the associated information about how this repository
 ## Additions
 
 ### v2 TLS Format
-The v2 format adds a new dynsym, `custom_labels_current_set_v2`. The format supports arbitrary string attributes 
+The v2 format adds a new dynsym, `otel_thread_ctx_v1`. The format supports arbitrary string attributes 
 as well as the core trace ID set. The code can be found alongside the v1 implementation. 
 
 ### Process Context

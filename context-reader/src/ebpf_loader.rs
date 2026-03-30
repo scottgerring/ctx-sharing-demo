@@ -22,7 +22,7 @@ use crate::tls_symbols::tls_accessor::TlsLocation;
 
 // Symbol names for V1 and V2 formats
 const V1_SYMBOL: &str = "custom_labels_current_set";
-const V2_SYMBOL: &str = "custom_labels_current_set_v2";
+const V2_SYMBOL: &str = "otel_thread_ctx_v1";
 
 /// Statistics for eBPF execution performance
 struct FormatStats {

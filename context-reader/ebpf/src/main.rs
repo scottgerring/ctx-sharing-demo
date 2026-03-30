@@ -25,7 +25,7 @@ static TARGET_PID: HashMap<u32, u32> = HashMap::with_max_entries(1, 0);
 #[map]
 static V1_TLS_CONFIG: HashMap<u32, TlsConfig> = HashMap::with_max_entries(1, 0);
 
-/// V2 TLS configuration (custom_labels_current_set_v2)
+/// V2 TLS configuration (otel_thread_ctx_v1)
 #[map]
 static V2_TLS_CONFIG: HashMap<u32, TlsConfig> = HashMap::with_max_entries(1, 0);
 
