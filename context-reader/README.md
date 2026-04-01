@@ -14,8 +14,7 @@ It needs:
 * Linux 
 * ELF binaries
 * ARM64 or X86-64
-
-You'll have to run it as root, or give it `CAP_SYS_PTRACE`.
+* **Root or `CAP_SYS_PTRACE`** - required for `process_vm_readv` to read process context and TLS from the target process. On Ubuntu/Debian, the default Yama ptrace scope (`kernel.yama.ptrace_scope=1`) restricts this to child processes only.
 
 ## Reading Modes
 
