@@ -71,8 +71,10 @@ fn run(args: Args) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn run_ptrace_validation(args: Args) -> Result<()> {
-    use context_reader::tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
-    use context_reader::tls_symbols::process::find_symbols_in_process;
+    use context_reader::tls_reader_trait::{
+        get_thread_ids, ThreadContext, ThreadResult, TlsReader,
+    };
+    use context_reader::tls_symbols::process::{find_symbols_in_process, AccessModelPolicy};
     use context_reader::tls_symbols::tls_accessor;
     use context_reader::v1_reader::V1Reader;
     use context_reader::v2_reader::V2Reader;
@@ -82,17 +84,26 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
     use std::time::{Duration, Instant};
     use tracing::{debug, info};
 
-    // Scan symbols once for all readers
-    let all_symbols = find_symbols_in_process(args.pid)
-        .context("Failed to scan process symbols")?;
+    // The validator is always strict: the spec requires TLSDESC or Static TLS,
+    // and non-compliant binaries must fail loudly here so build issues are
+    // caught in CI rather than masked at runtime.
+    let policy = AccessModelPolicy::strict();
 
-    // Read process context once (needed for V2)
-    let process_ctx = process_context::read_process_context_from_pid(args.pid).ok();
+    // Scan symbols once for all readers
+    let all_symbols =
+        find_symbols_in_process(args.pid).context("Failed to scan process symbols")?;
+
+    // Read process context once (needed for V2). We deliberately preserve the
+    // underlying error so the operator can distinguish "no OTEL_CTX mapping at
+    // all" from "mapping found but rejected" (wrong version, bad signature,
+    // update in progress, ...). Previously this was `.ok()` and we logged a
+    // misleading "no process-context found" message that masked the real cause.
+    let process_ctx = process_context::read_process_context_from_pid(args.pid);
 
     // Try to set up readers - collect all that succeed
     let mut readers: Vec<Box<dyn TlsReader>> = Vec::new();
 
-    match V1Reader::try_setup(&all_symbols) {
+    match V1Reader::try_setup(&all_symbols, &policy) {
         Ok(reader) => {
             info!("V1 reader initialized successfully");
             readers.push(Box::new(reader));
@@ -102,8 +113,8 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
         }
     }
 
-    if let Some(ref ctx) = process_ctx {
-        match V2Reader::try_setup(&all_symbols, ctx) {
+    match &process_ctx {
+        Ok(ctx) => match V2Reader::try_setup(&all_symbols, ctx, &policy) {
             Ok(reader) => {
                 info!("V2 reader initialized successfully");
                 readers.push(Box::new(reader));
@@ -111,13 +122,17 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
             Err(e) => {
                 info!("V2 reader not available: {}", e);
             }
+        },
+        Err(e) => {
+            info!("V2 reader not available: process-context not usable: {}", e);
         }
-    } else {
-        info!("V2 reader not available: no process-context found");
     }
 
     if readers.is_empty() {
-        anyhow::bail!("No TLS readers could be initialized for process {}", args.pid);
+        anyhow::bail!(
+            "No TLS readers could be initialized for process {}",
+            args.pid
+        );
     }
 
     info!("Initialized {} TLS reader(s)", readers.len());
@@ -129,7 +144,10 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
     loop {
         // Check timeout
         if start_time.elapsed() > timeout_duration {
-            eprintln!("VALIDATE FAILED: Timeout after {}s - no labels found", args.timeout);
+            eprintln!(
+                "VALIDATE FAILED: Timeout after {}s - no labels found",
+                args.timeout
+            );
             std::process::exit(1);
         }
 
@@ -181,7 +199,10 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
             // Detach immediately after reading thread pointer
             let _ = ptrace::detach(thread_pid, None);
 
-            thread_contexts.push(ThreadContext { tid, thread_pointer });
+            thread_contexts.push(ThreadContext {
+                tid,
+                thread_pointer,
+            });
         }
 
         // Check each reader for each thread
@@ -193,7 +214,11 @@ fn run_ptrace_validation(args: Args) -> Result<()> {
                         "[{}] thread={}, labels=[{}]",
                         reader.name(),
                         tid,
-                        labels.iter().map(|l| format!("{}={}", l.key, l.value)).collect::<Vec<_>>().join(", ")
+                        labels
+                            .iter()
+                            .map(|l| format!("{}={}", l.key, l.value))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                     println!("VALIDATE OK: {}", summary);
                     std::process::exit(0);
@@ -224,6 +249,8 @@ fn run_ebpf_validation(args: Args) -> Result<()> {
             ReaderMode::Both,
             true, // validate_only
             args.timeout,
-        ).await
+            context_reader::tls_symbols::process::AccessModelPolicy::strict(),
+        )
+        .await
     })
 }

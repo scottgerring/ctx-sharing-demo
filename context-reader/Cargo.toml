@@ -24,6 +24,10 @@ path = "src/bin/validate.rs"
 name = "tail"
 path = "src/bin/tail.rs"
 
+[[bin]]
+name = "check-elf"
+path = "src/bin/check-elf.rs"
+
 [dependencies]
 goblin = "0.9"
 anyhow = "1.0"

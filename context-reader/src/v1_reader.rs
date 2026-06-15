@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
-use crate::tls_symbols::process::{FoundSymbols, LoadedTlsSymbol};
+use crate::tls_symbols::process::{AccessModelPolicy, FoundSymbols, LoadedTlsSymbol};
 use crate::tls_symbols::tls_accessor;
 
 // Custom labels symbol names
@@ -48,7 +48,7 @@ pub struct V1Reader {
 
 impl V1Reader {
     /// Try to set up the V1 reader from pre-scanned symbols
-    pub fn try_setup(all_symbols: &[FoundSymbols]) -> Result<Self> {
+    pub fn try_setup(all_symbols: &[FoundSymbols], policy: &AccessModelPolicy) -> Result<Self> {
         use std::fs;
 
         // Find the binary that has our required symbols
@@ -100,7 +100,7 @@ impl V1Reader {
         );
 
         let library = found
-            .tls_location_for(CUSTOM_LABELS_CURRENT_SET)
+            .tls_location_for(CUSTOM_LABELS_CURRENT_SET, policy)
             .context("Failed to compute TLS location")?;
 
         Ok(Self { library })
@@ -138,8 +138,14 @@ impl V1Reader {
     fn read_thread_labels(&self, pid: i32, ctx: &ThreadContext) -> Result<Vec<Label>> {
         use tracing::debug;
 
-        debug!("V1 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
-        debug!("V1 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
+        debug!(
+            "V1 thread_pointer for tid {}: {:#x}",
+            ctx.tid, ctx.thread_pointer
+        );
+        debug!(
+            "V1 TLS location for tid {}: {:?}",
+            ctx.tid, self.library.tls_location
+        );
 
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
@@ -164,14 +170,22 @@ impl V1Reader {
         // or with ASLR in ranges like 0xffff_xxxx_xxxx for stack/mmap regions
         // Reject obviously invalid pointers to avoid crashes
         #[cfg(target_arch = "aarch64")]
-        if labelset_ptr < 0x1000 || (labelset_ptr > 0x0000_ffff_ffff_ffff && labelset_ptr < 0xffff_0000_0000_0000) {
-            debug!("V1 labelset_ptr {:#x} looks invalid for tid {}, skipping", labelset_ptr, ctx.tid);
+        if labelset_ptr < 0x1000
+            || (labelset_ptr > 0x0000_ffff_ffff_ffff && labelset_ptr < 0xffff_0000_0000_0000)
+        {
+            debug!(
+                "V1 labelset_ptr {:#x} looks invalid for tid {}, skipping",
+                labelset_ptr, ctx.tid
+            );
             return Ok(Vec::new());
         }
 
         #[cfg(target_arch = "x86_64")]
         if labelset_ptr < 0x1000 || labelset_ptr > 0x7fff_ffff_ffff {
-            debug!("V1 labelset_ptr {:#x} looks invalid for tid {}, skipping", labelset_ptr, ctx.tid);
+            debug!(
+                "V1 labelset_ptr {:#x} looks invalid for tid {}, skipping",
+                labelset_ptr, ctx.tid
+            );
             return Ok(Vec::new());
         }
 
@@ -197,20 +211,31 @@ fn parse_labels(pid: i32, labelset: CustomLabelsLabelSet) -> Result<Vec<Label>> 
 
     // Sanity check: count should be reasonable (max ~1000 labels)
     if labelset.count > 1000 {
-        debug!("Labelset count {} is unreasonably large, skipping", labelset.count);
+        debug!(
+            "Labelset count {} is unreasonably large, skipping",
+            labelset.count
+        );
         return Ok(Vec::new());
     }
 
     // Sanity check: storage pointer should look valid
     #[cfg(target_arch = "aarch64")]
-    if labelset.storage < 0x1000 || (labelset.storage > 0x0000_ffff_ffff_ffff && labelset.storage < 0xffff_0000_0000_0000) {
-        debug!("Labelset storage {:#x} looks invalid, skipping", labelset.storage);
+    if labelset.storage < 0x1000
+        || (labelset.storage > 0x0000_ffff_ffff_ffff && labelset.storage < 0xffff_0000_0000_0000)
+    {
+        debug!(
+            "Labelset storage {:#x} looks invalid, skipping",
+            labelset.storage
+        );
         return Ok(Vec::new());
     }
 
     #[cfg(target_arch = "x86_64")]
     if labelset.storage < 0x1000 || labelset.storage > 0x7fff_ffff_ffff {
-        debug!("Labelset storage {:#x} looks invalid, skipping", labelset.storage);
+        debug!(
+            "Labelset storage {:#x} looks invalid, skipping",
+            labelset.storage
+        );
         return Ok(Vec::new());
     }
 

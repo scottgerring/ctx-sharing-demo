@@ -11,13 +11,15 @@ use aya::{
     Ebpf,
 };
 use aya_log::EbpfLogger;
-use context_reader_common::{is_valid_static_tls_offset, KernelOffsets, LabelEvent, ReaderMode, TlsConfig};
+use context_reader_common::{
+    is_valid_static_tls_offset, KernelOffsets, LabelEvent, ReaderMode, TlsConfig,
+};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::output;
 use crate::tls_reader_trait::{Label, LabelValue, ThreadResult};
-use crate::tls_symbols::process::find_known_symbols_in_process;
+use crate::tls_symbols::process::{find_known_symbols_in_process, AccessModelPolicy};
 use crate::tls_symbols::tls_accessor::TlsLocation;
 
 // Symbol names for V1 and V2 formats
@@ -65,7 +67,14 @@ pub struct EbpfConfig {
 }
 
 /// Run the eBPF-based label reader
-pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, validate_only: bool, timeout_secs: u64) -> Result<()> {
+pub async fn run_ebpf(
+    pid: i32,
+    sample_freq: u64,
+    reader_mode: ReaderMode,
+    validate_only: bool,
+    timeout_secs: u64,
+    policy: AccessModelPolicy,
+) -> Result<()> {
     // Load the eBPF program from the build output path
     // The BPF program must be built first using:
     //   cd ebpf && cargo build --release
@@ -84,7 +93,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
         .find_map(|path| std::fs::read(path).ok())
         .context(
             "Failed to find compiled eBPF program. \
-             Build it first with: cd ebpf && cargo build --release"
+             Build it first with: cd ebpf && cargo build --release",
         )?;
 
     let mut bpf = Ebpf::load(&bpf_bytes).context("Failed to load eBPF program")?;
@@ -95,16 +104,20 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     }
 
     // Configure target PID
-    let mut target_pid: HashMap<_, u32, u32> =
-        HashMap::try_from(bpf.map_mut("TARGET_PID").context("TARGET_PID map not found")?)?;
+    let mut target_pid: HashMap<_, u32, u32> = HashMap::try_from(
+        bpf.map_mut("TARGET_PID")
+            .context("TARGET_PID map not found")?,
+    )?;
     target_pid
         .insert(0, pid as u32, 0)
         .context("Failed to set target PID")?;
     debug!("Configured target PID: {}", pid);
 
     // Configure reader mode
-    let mut reader_mode_map: HashMap<_, u32, u8> =
-        HashMap::try_from(bpf.map_mut("READER_MODE").context("READER_MODE map not found")?)?;
+    let mut reader_mode_map: HashMap<_, u32, u8> = HashMap::try_from(
+        bpf.map_mut("READER_MODE")
+            .context("READER_MODE map not found")?,
+    )?;
     reader_mode_map
         .insert(0, reader_mode as u8, 0)
         .context("Failed to set reader mode")?;
@@ -114,17 +127,22 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
     configure_kernel_offsets(&mut bpf)?;
 
     // Discover TLS symbols and configure maps (only for enabled readers)
-    configure_tls_maps(&mut bpf, pid, reader_mode)?;
+    configure_tls_maps(&mut bpf, pid, reader_mode, &policy)?;
 
     // Attach to perf events on all CPUs
     let program: &mut PerfEvent = bpf
         .program_mut("on_cpu_sample")
         .context("on_cpu_sample program not found")?
         .try_into()?;
-    program.load().context("Failed to load perf_event program")?;
+    program
+        .load()
+        .context("Failed to load perf_event program")?;
 
     let num_cpus = num_cpus()?;
-    debug!("Attaching to {} CPUs with frequency {}Hz", num_cpus, sample_freq);
+    debug!(
+        "Attaching to {} CPUs with frequency {}Hz",
+        num_cpus, sample_freq
+    );
 
     // CRITICAL: Must keep Link objects alive! If dropped, perf events detach.
     let mut _links = Vec::new();
@@ -141,7 +159,10 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
         _links.push(link);
     }
 
-    debug!("eBPF program attached to {} CPUs, processing events...", _links.len());
+    debug!(
+        "eBPF program attached to {} CPUs, processing events...",
+        _links.len()
+    );
 
     // Process events from ring buffer
     // KEY: Use map_mut() not take_map() so bpf stays alive (otherwise BPF program unloads!)
@@ -176,7 +197,10 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
 
         // Check timeout in validate-only mode
         if validate_only && start_time.elapsed() > timeout_duration {
-            eprintln!("VALIDATE FAILED: Timeout after {}s - no labels found", timeout_secs);
+            eprintln!(
+                "VALIDATE FAILED: Timeout after {}s - no labels found",
+                timeout_secs
+            );
             std::process::exit(1);
         }
 
@@ -199,8 +223,11 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
             let item: &[u8] = &item;
 
             // DEBUG: Log what we actually received
-            debug!("Received ringbuf item: {} bytes (expected: {})",
-                  item.len(), std::mem::size_of::<LabelEvent>());
+            debug!(
+                "Received ringbuf item: {} bytes (expected: {})",
+                item.len(),
+                std::mem::size_of::<LabelEvent>()
+            );
 
             if item.len() >= std::mem::size_of::<LabelEvent>() {
                 let event = unsafe { &*(item.as_ptr() as *const LabelEvent) };
@@ -240,7 +267,10 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
             if let ThreadResult::Found { tid, labels } = result {
                 any_labels_found = true;
                 if found_labels_summary.is_none() {
-                    let reader_name = if v1_results.iter().any(|r| matches!(r, ThreadResult::Found { tid: t, .. } if t == tid)) {
+                    let reader_name = if v1_results
+                        .iter()
+                        .any(|r| matches!(r, ThreadResult::Found { tid: t, .. } if t == tid))
+                    {
                         "v1-ebpf"
                     } else {
                         "v2-ebpf"
@@ -249,7 +279,11 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
                         "[{}] thread={}, labels=[{}]",
                         reader_name,
                         tid,
-                        labels.iter().map(|l| format!("{}={}", l.key, l.value)).collect::<Vec<_>>().join(", ")
+                        labels
+                            .iter()
+                            .map(|l| format!("{}={}", l.key, l.value))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }
@@ -283,7 +317,7 @@ pub async fn run_ebpf(pid: i32, sample_freq: u64, reader_mode: ReaderMode, valid
 
 /// Calculate kernel struct offsets from BTF and configure the map.
 /// This provides kernel version portability without hardcoded offsets.
-/// TODO this is gross; find a better way 
+/// TODO this is gross; find a better way
 fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
     // Use pahole to get offsets from BTF
     let task_struct_thread = std::process::Command::new("pahole")
@@ -344,8 +378,10 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
     );
 
     // Configure the BPF map
-    let mut offsets_map: HashMap<_, u32, KernelOffsets> =
-        HashMap::try_from(bpf.map_mut("KERNEL_OFFSETS").context("KERNEL_OFFSETS map not found")?)?;
+    let mut offsets_map: HashMap<_, u32, KernelOffsets> = HashMap::try_from(
+        bpf.map_mut("KERNEL_OFFSETS")
+            .context("KERNEL_OFFSETS map not found")?,
+    )?;
 
     let arch = if cfg!(target_arch = "x86_64") {
         0 // Architecture::X86_64
@@ -373,7 +409,12 @@ fn configure_kernel_offsets(bpf: &mut Ebpf) -> Result<()> {
 }
 
 /// Configure V1 and V2 TLS maps with discovered symbol locations
-fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Result<()> {
+fn configure_tls_maps(
+    bpf: &mut Ebpf,
+    pid: i32,
+    reader_mode: ReaderMode,
+    policy: &AccessModelPolicy,
+) -> Result<()> {
     // Detect libc type once for this process
     let libc_type = match crate::tls_symbols::dynamic_linker::detect_libc(pid) {
         Ok(crate::tls_symbols::dynamic_linker::Libc::Musl) => {
@@ -393,11 +434,13 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
     // Try to find V1 symbols (only if V1 reader is enabled)
     if reader_mode.v1_enabled() {
         if let Ok(found) = find_known_symbols_in_process(pid, &[V1_SYMBOL]) {
-            let location = found.tls_location_for(V1_SYMBOL)?;
+            let location = found.tls_location_for(V1_SYMBOL, policy)?;
             let config = tls_location_to_config(&location.tls_location, libc_type);
 
-            let mut v1_config: HashMap<_, u32, TlsConfig> =
-                HashMap::try_from(bpf.map_mut("V1_TLS_CONFIG").context("V1_TLS_CONFIG map not found")?)?;
+            let mut v1_config: HashMap<_, u32, TlsConfig> = HashMap::try_from(
+                bpf.map_mut("V1_TLS_CONFIG")
+                    .context("V1_TLS_CONFIG map not found")?,
+            )?;
             v1_config
                 .insert(0, config, 0)
                 .context("Failed to set V1 TLS config")?;
@@ -413,12 +456,14 @@ fn configure_tls_maps(bpf: &mut Ebpf, pid: i32, reader_mode: ReaderMode) -> Resu
     // Try to find V2 symbols (only if V2 reader is enabled)
     if reader_mode.v2_enabled() {
         if let Ok(found) = find_known_symbols_in_process(pid, &[V2_SYMBOL]) {
-            let location = found.tls_location_for(V2_SYMBOL)?;
+            let location = found.tls_location_for(V2_SYMBOL, policy)?;
 
             let config = tls_location_to_config(&location.tls_location, libc_type);
 
-            let mut v2_config: HashMap<_, u32, TlsConfig> =
-                HashMap::try_from(bpf.map_mut("V2_TLS_CONFIG").context("V2_TLS_CONFIG map not found")?)?;
+            let mut v2_config: HashMap<_, u32, TlsConfig> = HashMap::try_from(
+                bpf.map_mut("V2_TLS_CONFIG")
+                    .context("V2_TLS_CONFIG map not found")?,
+            )?;
             v2_config
                 .insert(0, config, 0)
                 .context("Failed to set V2 TLS config")?;
@@ -440,13 +485,18 @@ fn tls_location_to_config(location: &TlsLocation, libc_type: u8) -> TlsConfig {
         TlsLocation::MainExecutable { offset } => TlsConfig {
             module_id: 0,
             offset: *offset as u64,
-            tls_offset: 0,  // Not used for main executable
+            tls_offset: 0, // Not used for main executable
             is_main_executable: 1,
-            use_static_tls: 0,  // Not applicable for main executable
+            use_static_tls: 0, // Not applicable for main executable
             libc_type,
             _pad: [0; 5],
         },
-        TlsLocation::SharedLibrary { module_id, offset, tls_offset, .. } => {
+        TlsLocation::SharedLibrary {
+            module_id,
+            offset,
+            tls_offset,
+            ..
+        } => {
             // Determine if eBPF should use static TLS based on tls_offset validity
             // Note: tlsdesc could also be used here - once resolved it's just another static offset
             let use_static = is_valid_static_tls_offset(*tls_offset);
@@ -459,7 +509,7 @@ fn tls_location_to_config(location: &TlsLocation, libc_type: u8) -> TlsConfig {
                 libc_type,
                 _pad: [0; 5],
             }
-        },
+        }
     }
 }
 
@@ -606,9 +656,21 @@ fn print_stats(name: &str, stats: &FormatStats) {
 
     println!("\n[{}] eBPF Execution Statistics:", name);
     println!("  Events processed: {}", stats.count);
-    println!("  Min time:         {} ns ({:.3} µs)", stats.min_ns, stats.min_ns as f64 / 1000.0);
-    println!("  Max time:         {} ns ({:.3} µs)", stats.max_ns, stats.max_ns as f64 / 1000.0);
-    println!("  Avg time:         {} ns ({:.3} µs)", stats.avg_ns(), stats.avg_ns() as f64 / 1000.0);
+    println!(
+        "  Min time:         {} ns ({:.3} µs)",
+        stats.min_ns,
+        stats.min_ns as f64 / 1000.0
+    );
+    println!(
+        "  Max time:         {} ns ({:.3} µs)",
+        stats.max_ns,
+        stats.max_ns as f64 / 1000.0
+    );
+    println!(
+        "  Avg time:         {} ns ({:.3} µs)",
+        stats.avg_ns(),
+        stats.avg_ns() as f64 / 1000.0
+    );
 }
 
 /// Get the number of online CPUs

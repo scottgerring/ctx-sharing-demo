@@ -47,6 +47,15 @@ struct Args {
     /// Only applies to eBPF mode - controls which readers are active in the eBPF program.
     #[arg(long, value_enum, default_value_t = ReaderSelection::Both)]
     readers: ReaderSelection,
+
+    /// Accept General Dynamic (GD) TLS access with a warning instead of
+    /// failing. Other non-compliant access models still fail. By default, only
+    /// TLSDESC (shared library) and Static TLS (main executable) are permitted,
+    /// in line with the published spec. Use this flag if you need to read from
+    /// a binary that was built without `-mtls-dialect=gnu2` (e.g. an older or
+    /// non-conforming agent) and you accept the resulting risks.
+    #[arg(long, default_value_t = false)]
+    tolerate_gd_tls: bool,
 }
 
 fn main() -> Result<()> {
@@ -84,8 +93,10 @@ fn run(args: Args) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn run_ptrace_mode(args: Args) -> Result<()> {
     use context_reader::output;
-    use context_reader::tls_reader_trait::{get_thread_ids, ThreadContext, ThreadResult, TlsReader};
-    use context_reader::tls_symbols::process::find_symbols_in_process;
+    use context_reader::tls_reader_trait::{
+        get_thread_ids, ThreadContext, ThreadResult, TlsReader,
+    };
+    use context_reader::tls_symbols::process::{find_symbols_in_process, AccessModelPolicy};
     use context_reader::tls_symbols::tls_accessor;
     use context_reader::v1_reader::V1Reader;
     use context_reader::v2_reader::V2Reader;
@@ -95,17 +106,27 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
     use std::time::Duration;
     use tracing::{debug, info};
 
-    // Scan symbols once for all readers
-    let all_symbols = find_symbols_in_process(args.pid)
-        .context("Failed to scan process symbols")?;
+    let policy = if args.tolerate_gd_tls {
+        AccessModelPolicy::tolerant()
+    } else {
+        AccessModelPolicy::strict()
+    };
 
-    // Read process context once (needed for V2)
-    let process_ctx = process_context::read_process_context_from_pid(args.pid).ok();
+    // Scan symbols once for all readers
+    let all_symbols =
+        find_symbols_in_process(args.pid).context("Failed to scan process symbols")?;
+
+    // Read process context once (needed for V2). We deliberately preserve the
+    // underlying error so the operator can distinguish "no OTEL_CTX mapping at
+    // all" from "mapping found but rejected" (wrong version, bad signature,
+    // update in progress, ...). Previously this was `.ok()` and we logged a
+    // misleading "no process-context found" message that masked the real cause.
+    let process_ctx = process_context::read_process_context_from_pid(args.pid);
 
     // Try to set up readers - collect all that succeed
     let mut readers: Vec<Box<dyn TlsReader>> = Vec::new();
 
-    match V1Reader::try_setup(&all_symbols) {
+    match V1Reader::try_setup(&all_symbols, &policy) {
         Ok(reader) => {
             info!("V1 reader initialized successfully");
             readers.push(Box::new(reader));
@@ -115,8 +136,8 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
         }
     }
 
-    if let Some(ref ctx) = process_ctx {
-        match V2Reader::try_setup(&all_symbols, ctx) {
+    match &process_ctx {
+        Ok(ctx) => match V2Reader::try_setup(&all_symbols, ctx, &policy) {
             Ok(reader) => {
                 info!("V2 reader initialized successfully");
                 readers.push(Box::new(reader));
@@ -124,13 +145,17 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
             Err(e) => {
                 info!("V2 reader not available: {}", e);
             }
+        },
+        Err(e) => {
+            info!("V2 reader not available: process-context not usable: {}", e);
         }
-    } else {
-        info!("V2 reader not available: no process-context found");
     }
 
     if readers.is_empty() {
-        anyhow::bail!("No TLS readers could be initialized for process {}", args.pid);
+        anyhow::bail!(
+            "No TLS readers could be initialized for process {}",
+            args.pid
+        );
     }
 
     info!("Initialized {} TLS reader(s)", readers.len());
@@ -195,16 +220,18 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
             // Detach immediately after reading thread pointer
             let _ = ptrace::detach(thread_pid, None);
 
-            thread_contexts.push(ThreadContext { tid, thread_pointer });
+            thread_contexts.push(ThreadContext {
+                tid,
+                thread_pointer,
+            });
         }
 
         let mut any_labels_found = false;
 
         // Now call each reader for each thread (no ptrace needed)
         for reader in &readers {
-            let mut results: Vec<ThreadResult> = Vec::with_capacity(
-                thread_contexts.len() + thread_errors.len(),
-            );
+            let mut results: Vec<ThreadResult> =
+                Vec::with_capacity(thread_contexts.len() + thread_errors.len());
 
             // Process successful thread contexts
             for ctx in &thread_contexts {
@@ -244,6 +271,7 @@ fn run_ptrace_mode(args: Args) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn run_ebpf_mode(args: Args) -> Result<()> {
+    use context_reader::tls_symbols::process::AccessModelPolicy;
     use context_reader_common::ReaderMode;
     use tracing::info;
 
@@ -252,6 +280,11 @@ fn run_ebpf_mode(args: Args) -> Result<()> {
         ReaderSelection::Both => ReaderMode::Both,
         ReaderSelection::V1 => ReaderMode::V1Only,
         ReaderSelection::V2 => ReaderMode::V2Only,
+    };
+    let policy = if args.tolerate_gd_tls {
+        AccessModelPolicy::tolerant()
+    } else {
+        AccessModelPolicy::strict()
     };
 
     info!(
@@ -268,6 +301,8 @@ fn run_ebpf_mode(args: Args) -> Result<()> {
             reader_mode,
             false, // validate_only
             0,     // timeout (not used when validate_only is false)
-        ).await
+            policy,
+        )
+        .await
     })
 }

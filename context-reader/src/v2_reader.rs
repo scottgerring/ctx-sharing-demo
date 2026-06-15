@@ -6,12 +6,12 @@
 use anyhow::{Context, Result};
 use custom_labels::process_context::ProcessContext;
 use custom_labels::v2::process_context_ext::TlsConfig;
-use custom_labels::v2::reader::{ParsedRecord, ParseError, V2_HEADER_SIZE};
+use custom_labels::v2::reader::{ParseError, ParsedRecord, V2_HEADER_SIZE};
 use tracing::{debug, info};
 
 use crate::tls_reader_trait::{Label, LabelValue, ThreadContext, ThreadResult, TlsReader};
 use crate::tls_symbols::memory::read_memory;
-use crate::tls_symbols::process::{FoundSymbols, LoadedTlsSymbol};
+use crate::tls_symbols::process::{AccessModelPolicy, FoundSymbols, LoadedTlsSymbol};
 use crate::tls_symbols::tls_accessor;
 
 // V2 symbol name
@@ -28,7 +28,11 @@ pub struct V2Reader {
 
 impl V2Reader {
     /// Try to set up the V2 reader from pre-scanned symbols and process context.
-    pub fn try_setup(all_symbols: &[FoundSymbols], process_ctx: &ProcessContext) -> Result<Self> {
+    pub fn try_setup(
+        all_symbols: &[FoundSymbols],
+        process_ctx: &ProcessContext,
+        policy: &AccessModelPolicy,
+    ) -> Result<Self> {
         // Parse TLS config from process-context
         let tls_config = TlsConfig::from_process_context(process_ctx)
             .ok_or_else(|| anyhow::anyhow!("No TLS config in process-context"))?;
@@ -58,7 +62,7 @@ impl V2Reader {
         );
 
         let library = found
-            .tls_location_for(OTEL_THREAD_CTX_V1)
+            .tls_location_for(OTEL_THREAD_CTX_V1, policy)
             .context("Failed to compute TLS location for v2")?;
 
         Ok(Self {
@@ -97,11 +101,19 @@ impl V2Reader {
         let elapsed_ns = start.elapsed().as_nanos();
 
         let Some(record_buf) = record_buf else {
-            debug!(tid = ctx.tid, elapsed_ns = elapsed_ns, "[v2] Memory read complete (null pointer)");
+            debug!(
+                tid = ctx.tid,
+                elapsed_ns = elapsed_ns,
+                "[v2] Memory read complete (null pointer)"
+            );
             return Ok(None);
         };
 
-        debug!(tid = ctx.tid, elapsed_ns = elapsed_ns, "[v2] Memory read complete");
+        debug!(
+            tid = ctx.tid,
+            elapsed_ns = elapsed_ns,
+            "[v2] Memory read complete"
+        );
 
         // Parse the record
         self.parse_record(&record_buf)
@@ -112,8 +124,14 @@ impl V2Reader {
     /// 2. If valid and attrs_data_size > 0, read the attribute bytes
     /// Returns None if the record pointer is null.
     fn read_record_memory(&self, pid: i32, ctx: &ThreadContext) -> Result<Option<Vec<u8>>> {
-        debug!("V2 thread_pointer for tid {}: {:#x}", ctx.tid, ctx.thread_pointer);
-        debug!("V2 TLS location for tid {}: {:?}", ctx.tid, self.library.tls_location);
+        debug!(
+            "V2 thread_pointer for tid {}: {:#x}",
+            ctx.tid, ctx.thread_pointer
+        );
+        debug!(
+            "V2 TLS location for tid {}: {:?}",
+            ctx.tid, self.library.tls_location
+        );
 
         let tls_addr = tls_accessor::get_tls_variable_address_with_thread_pointer(
             pid,
@@ -128,7 +146,10 @@ impl V2Reader {
         read_memory(pid, tls_addr, &mut ptr_bytes)?;
         let record_ptr = usize::from_ne_bytes(ptr_bytes);
 
-        debug!("V2 record_ptr for tid {}: {:#x} (raw bytes: {:02x?})", ctx.tid, record_ptr, ptr_bytes);
+        debug!(
+            "V2 record_ptr for tid {}: {:#x} (raw bytes: {:02x?})",
+            ctx.tid, record_ptr, ptr_bytes
+        );
 
         if record_ptr == 0 {
             return Ok(None);
@@ -206,7 +227,10 @@ impl V2Reader {
                 Err(_) => LabelValue::Bytes(attr.value),
             };
 
-            labels.push(Label { key: key_name, value });
+            labels.push(Label {
+                key: key_name,
+                value,
+            });
         }
 
         Ok(Some(labels))

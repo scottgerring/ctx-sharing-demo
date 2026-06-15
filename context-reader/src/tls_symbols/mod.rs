@@ -5,6 +5,9 @@
 // ELF reader works cross-platform (can read Linux ELF files on any OS)
 pub mod elf_reader;
 
+// TLS access-model classifier — pure ELF analysis, works cross-platform.
+pub mod access_model;
+
 // These modules require Linux-specific features
 #[cfg(target_os = "linux")]
 pub mod process;

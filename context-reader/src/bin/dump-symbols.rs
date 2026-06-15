@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use comfy_table::{Cell, ContentArrangement, Table, modifiers::UTF8_ROUND_CORNERS};
+use comfy_table::{modifiers::UTF8_ROUND_CORNERS, Cell, ContentArrangement, Table};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -97,16 +97,30 @@ fn print_symbols(pid: i32, filter: SymbolFilter, include_symtab: bool) -> Result
             Cell::new("Symbol Name"),
             Cell::new("Type"),
             Cell::new("Source"),
+            Cell::new("Access Model"),
+            Cell::new("Compliant"),
             Cell::new("Binary"),
         ]);
 
     let mut total_symbols = 0;
 
-    // Collect symbols for the table
+    // Collect symbols for the table.
+    //
+    // We parse each binary's ELF *once* up front and reuse the parsed view for
+    // every per-symbol classify call. Doing it the naive way (one parse per
+    // symbol) costs O(n) ELF parses per binary, which is wasteful for libs
+    // with many TLS symbols.
     for found in &all_symbols {
-        let binary_name = found.path.file_name()
+        let binary_name = found
+            .path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>");
+
+        let elf_bytes = std::fs::read(&found.path).ok();
+        let elf = elf_bytes
+            .as_deref()
+            .and_then(|b| goblin::elf::Elf::parse(b).ok());
 
         for (name, entry) in &found.symbol_info.symbols {
             let sym_type = entry.sym.st_type();
@@ -125,10 +139,40 @@ fn print_symbols(pid: i32, filter: SymbolFilter, include_symtab: bool) -> Result
             if should_print {
                 let type_str = if is_tls { "TLS" } else { "OBJECT" };
                 let source_str = if entry.is_dynamic { "dynsym" } else { "symtab" };
+
+                // Classify the TLS access model. For OBJECT (non-TLS) symbols
+                // the concept doesn't apply, so we just leave it blank.
+                let (model_str, compliant_str) = if is_tls {
+                    let result = match &elf {
+                        Some(parsed) => tls_symbols::access_model::classify_with_elf(
+                            parsed,
+                            name,
+                            found.symbol_info.is_main_executable,
+                            Some(&found.path),
+                        ),
+                        None => tls_symbols::access_model::classify(
+                            &found.path,
+                            name,
+                            found.symbol_info.is_main_executable,
+                        ),
+                    };
+                    match result {
+                        Ok(model) => (
+                            model.name().to_string(),
+                            if model.is_compliant() { "✓" } else { "✗" }.to_string(),
+                        ),
+                        Err(e) => (format!("error: {e}"), "?".to_string()),
+                    }
+                } else {
+                    ("-".to_string(), "-".to_string())
+                };
+
                 table.add_row(vec![
                     Cell::new(name),
                     Cell::new(type_str),
                     Cell::new(source_str),
+                    Cell::new(model_str),
+                    Cell::new(compliant_str),
                     Cell::new(binary_name),
                 ]);
                 total_symbols += 1;
@@ -140,7 +184,12 @@ fn print_symbols(pid: i32, filter: SymbolFilter, include_symtab: bool) -> Result
     println!("{}", table);
 
     // Print summary
-    println!("\nFound {} {} symbols across {} binaries", total_symbols, filter_desc, all_symbols.len());
+    println!(
+        "\nFound {} {} symbols across {} binaries",
+        total_symbols,
+        filter_desc,
+        all_symbols.len()
+    );
 
     Ok(())
 }

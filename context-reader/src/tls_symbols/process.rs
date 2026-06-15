@@ -2,11 +2,55 @@ use anyhow::{bail, Context, Result};
 use context_reader_common::is_valid_static_tls_offset;
 use procfs::process::{MMapPath, Process};
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use super::access_model;
 use super::dynamic_linker;
 use super::elf_reader::{find_tlsdesc_relocation, resolve_tlsdesc_offset, SymbolInfo};
 use super::tls_accessor::{TlsDescInfo, TlsLocation};
+
+/// Policy controlling whether non-compliant TLS access models are accepted.
+///
+/// The spec only permits TLSDESC (in shared libraries) and Static TLS (in the
+/// main executable / statically-linked binaries). General Dynamic, Local
+/// Dynamic, Initial Exec, and Local Exec from a shared library are
+/// non-compliant.
+///
+/// The validator (`bin/validate`) constructs this with `strict()` and refuses
+/// to operate on non-compliant binaries. The runtime reader can be invoked
+/// with `--tolerate-gd-tls` to fall back to `tolerant()`, which emits a
+/// `warn!` and continues only for General Dynamic (GD); other non-compliant
+/// models still fail.
+#[derive(Debug, Clone, Copy)]
+pub struct AccessModelPolicy {
+    /// If true, General Dynamic (GD) access is accepted with a `warn!`.
+    /// Other non-compliant access models always cause a hard error.
+    /// If false (the default and the spec), GD also causes a hard error.
+    pub tolerate_general_dynamic: bool,
+}
+
+impl AccessModelPolicy {
+    /// Spec-compliant policy: only TLSDESC and Static TLS are accepted.
+    pub const fn strict() -> Self {
+        Self {
+            tolerate_general_dynamic: false,
+        }
+    }
+
+    /// Lenient policy: General Dynamic (GD) is accepted with a `warn!`.
+    /// Used by the runtime reader when invoked with `--tolerate-gd-tls`.
+    pub const fn tolerant() -> Self {
+        Self {
+            tolerate_general_dynamic: true,
+        }
+    }
+}
+
+impl Default for AccessModelPolicy {
+    fn default() -> Self {
+        Self::strict()
+    }
+}
 
 /// Information about a TLS symbol found in a loaded binary (executable or shared library)
 #[derive(Debug, Clone)]
@@ -58,8 +102,12 @@ pub fn find_symbols_in_process(pid: i32) -> Result<Vec<FoundSymbols>> {
                 }
 
                 if !symbol_info.symbols.is_empty() {
-                    debug!("Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
-                        symbol_info.symbols.len(), path, symbol_info.is_main_executable);
+                    debug!(
+                        "Found {} TLS/OBJECT symbols in: {:?} (is_main_exe: {})",
+                        symbol_info.symbols.len(),
+                        path,
+                        symbol_info.is_main_executable
+                    );
                     results.push(FoundSymbols {
                         pid,
                         path: path.clone(),
@@ -128,7 +176,11 @@ pub struct FoundSymbols {
 
 impl FoundSymbols {
     /// Compute the TLS location for a specific symbol
-    pub fn tls_location_for(&self, symbol_name: &str) -> Result<LoadedTlsSymbol> {
+    pub fn tls_location_for(
+        &self,
+        symbol_name: &str,
+        policy: &AccessModelPolicy,
+    ) -> Result<LoadedTlsSymbol> {
         let symbol_entry = self
             .symbol_info
             .symbols
@@ -136,6 +188,55 @@ impl FoundSymbols {
             .ok_or_else(|| anyhow::anyhow!("Symbol '{}' not found", symbol_name))?;
 
         let symbol = &symbol_entry.sym;
+
+        // ----- Access-model gate ---------------------------------------
+        //
+        // Classify how this symbol is accessed (TLSDESC / Static TLS / GD /
+        // IE / ...) by inspecting the binary's relocations. Spec only
+        // permits TLSDESC and Static TLS. Anything else is rejected here,
+        // except GD when the caller passed a tolerant policy.
+        let model =
+            access_model::classify(&self.path, symbol_name, self.symbol_info.is_main_executable)
+                .with_context(|| {
+                    format!("failed to classify TLS access model for {symbol_name:?}")
+                })?;
+
+        info!(
+            "TLS access model for {:?} in {}: {} (st_value={:#x}, is_main_exe={})",
+            symbol_name,
+            self.path.display(),
+            model.name(),
+            symbol.st_value,
+            self.symbol_info.is_main_executable,
+        );
+
+        if !model.is_compliant() {
+            let hint = model
+                .remediation_hint()
+                .unwrap_or("see ELF TLS access model documentation");
+            if policy.tolerate_general_dynamic
+                && matches!(model, access_model::TlsAccessModel::GeneralDynamic { .. })
+            {
+                warn!(
+                    "NON-COMPLIANT TLS access model for {:?} in {}: {} \
+                     \u{2014} continuing because --tolerate-gd-tls is set. Hint: {}",
+                    symbol_name,
+                    self.path.display(),
+                    model.name(),
+                    hint,
+                );
+            } else {
+                bail!(
+                    "NON-COMPLIANT TLS access model for {:?} in {}: {}. \
+                     Spec requires TLSDESC (shared library) or Static TLS (main \
+                     executable). Hint: {}",
+                    symbol_name,
+                    self.path.display(),
+                    model.name(),
+                    hint,
+                );
+            }
+        }
 
         // Determine TLS location
         let tls_location = if self.symbol_info.is_main_executable {
@@ -198,11 +299,17 @@ impl FoundSymbols {
                         })
                     }
                     Ok(None) => {
-                        debug!("No TLSDESC relocation found for {} in {:?}", symbol_name, self.path);
+                        debug!(
+                            "No TLSDESC relocation found for {} in {:?}",
+                            symbol_name, self.path
+                        );
                         None
                     }
                     Err(e) => {
-                        debug!("Error looking up TLSDESC relocation for {}: {}", symbol_name, e);
+                        debug!(
+                            "Error looking up TLSDESC relocation for {}: {}",
+                            symbol_name, e
+                        );
                         None
                     }
                 };
@@ -210,7 +317,11 @@ impl FoundSymbols {
                 // If tls_offset from link_map is invalid, try to resolve via TLSDESC
                 if !is_valid_static_tls_offset(tls_offset) {
                     if let Some(ref desc_info) = tlsdesc {
-                        match resolve_tlsdesc_offset(self.pid, &desc_info.library_path, desc_info.got_offset) {
+                        match resolve_tlsdesc_offset(
+                            self.pid,
+                            &desc_info.library_path,
+                            desc_info.got_offset,
+                        ) {
                             Ok(tlsdesc_arg) => {
                                 // TLSDESC arg = tls_offset + symbol_offset (on aarch64)
                                 // So: tls_offset = tlsdesc_arg - symbol_offset
