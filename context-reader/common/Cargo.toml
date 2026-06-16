@@ -5,8 +5,13 @@ edition = "2021"
 
 [features]
 default = []
-# Enable this for userspace builds (std environment)
-std = ["aya"]
+# Enable this for userspace builds (std environment). std is platform-agnostic
+# and does NOT pull in aya — aya only exists on Linux.
+std = []
+# Pull in aya and implement aya::Pod for our shared types so they can be used
+# in BPF maps. Only enable this on Linux; on macOS/other targets aya does not
+# build (it references Linux-only libc constants like SYS_bpf, CLOCK_BOOTTIME).
+aya = ["dep:aya"]
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 aya = { version = "0.13", default-features = false, optional = true }

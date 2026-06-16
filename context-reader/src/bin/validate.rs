@@ -3,7 +3,12 @@
 //! One-shot validation that labels can be read correctly. Exits with 0 on success,
 //! or 1 on timeout/failure.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+// `Context` is only used inside the Linux-gated functions below. Importing it
+// unconditionally produces an unused-import warning on non-Linux builds (the
+// non-Linux main() just bails) — hence the cfg gate.
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 

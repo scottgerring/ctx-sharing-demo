@@ -37,10 +37,13 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 comfy-table = "7.1"
 
-# Shared types with eBPF program
+# Shared types with eBPF program. The `std` feature is platform-agnostic; the
+# Linux-only target table below additionally enables `aya` so the shared
+# types implement `aya::Pod` for use in BPF maps.
 context-reader-common = { path = "common", features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+context-reader-common = { path = "common", features = ["std", "aya"] }
 nix = { version = "0.29", features = ["process", "ptrace", "uio"] }
 procfs = "0.17"
 libc = "0.2"

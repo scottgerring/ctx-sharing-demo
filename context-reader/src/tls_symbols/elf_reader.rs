@@ -1,4 +1,9 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+// `anyhow!` is only used inside the Linux-gated functions below
+// (`find_library_base_address`, `resolve_tlsdesc_offset`). Importing it
+// unconditionally produces an unused-import warning on non-Linux builds.
+#[cfg(target_os = "linux")]
+use anyhow::anyhow;
 use goblin::elf::{Elf, Sym};
 use std::collections::HashMap;
 use std::fs;

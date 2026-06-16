@@ -2,10 +2,17 @@
 //!
 //! This binary discovers and displays TLS symbol information for debugging and development.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use comfy_table::{modifiers::UTF8_ROUND_CORNERS, Cell, ContentArrangement, Table};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+// The bulk of this binary (table rendering, process scanning, anyhow::Context
+// usage) is Linux-only. Importing those symbols unconditionally produces
+// unused-import warnings on non-Linux builds, where main() just bails.
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+#[cfg(target_os = "linux")]
+use comfy_table::{modifiers::UTF8_ROUND_CORNERS, Cell, ContentArrangement, Table};
 
 #[derive(Parser, Debug)]
 #[command(name = "dump-symbols")]

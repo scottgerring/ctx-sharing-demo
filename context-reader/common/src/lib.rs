@@ -266,14 +266,15 @@ mod std_impls {
     }
 }
 
-// Implement aya's Pod trait for our types (only when aya is available)
-#[cfg(feature = "std")]
+// Implement aya's Pod trait for our types. Only when the `aya` feature is
+// enabled, which itself is only valid on Linux — see Cargo.toml.
+#[cfg(feature = "aya")]
 unsafe impl aya::Pod for TlsConfig {}
-#[cfg(feature = "std")]
+#[cfg(feature = "aya")]
 unsafe impl aya::Pod for LabelEvent {}
-#[cfg(feature = "std")]
+#[cfg(feature = "aya")]
 unsafe impl aya::Pod for KernelOffsets {}
-#[cfg(feature = "std")]
+#[cfg(feature = "aya")]
 unsafe impl aya::Pod for ReaderMode {}
 
 #[cfg(test)]
